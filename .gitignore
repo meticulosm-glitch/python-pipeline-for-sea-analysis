@@ -1,0 +1,8 @@
+.env
+.cdsapirc
+data/*
+GRANULE/*
+.venv/*
+__pycache__/*
+.DS_Store
+6S/*
