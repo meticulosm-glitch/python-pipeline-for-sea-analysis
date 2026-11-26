@@ -13,7 +13,11 @@ se interrompi la parte di incertezza non perdi le tabelle già calcolate.
 Prerequisiti
 
 1. Dipendenze Python:
-   pip install prefect Py6S numpy scipy rasterio boto3 cdsapi xarray netCDF4 python-dotenv tabulate matplotlib
+   `pip install prefect Py6S numpy scipy rasterio boto3 cdsapi xarray netCDF4 python-dotenv tabulate matplotlib`
+
+   oppure: 
+
+   `pip install -r requirements.txt`
 
 2. Binario 6S compilato https://github.com/robintw/6S
 3. Credenziali CDSE (Copernicus Data Space Ecosystem) da mettere in env

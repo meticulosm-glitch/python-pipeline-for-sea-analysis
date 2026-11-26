@@ -1,0 +1,14 @@
+
+prefect
+Py6S
+numpy
+scipy
+rasterio
+boto3
+cdsapi
+xarray
+netCDF4
+python-dotenv
+tabulate
+matplotlib
+
