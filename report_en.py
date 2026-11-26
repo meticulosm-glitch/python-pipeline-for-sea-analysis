@@ -80,6 +80,28 @@ def _en_overlap(propria: float, riferimento: float,
     return float(en), bool(abs(en) <= 1)
 
 
+def _u_rif_ndci(ref: dict, mask: np.ndarray) -> float:
+    """Propagazione GUM dal 1° ordine: NDCI = (b05-b04)/(b05+b04)."""
+    rho_b04 = _media_mascherata(ref["boa"]["B04"], mask)
+    rho_b05 = _media_mascherata(ref["boa"]["B05"], mask)
+    u_b04 = MAPE_ASSUNTO * rho_b04
+    u_b05 = MAPE_ASSUNTO * rho_b05
+    d_b04 = -2 * rho_b05 / (rho_b04 + rho_b05) ** 2
+    d_b05 = 2 * rho_b04 / (rho_b04 + rho_b05) ** 2
+    return float(np.sqrt((d_b04 * u_b04) ** 2 + (d_b05 * u_b05) ** 2))
+
+
+def _u_rif_torbidita(ref: dict, mask: np.ndarray) -> float:
+    """Propagazione GUM dal 1° ordine: Torbidità = b08/b03."""
+    rho_b03 = _media_mascherata(ref["boa"]["B03"], mask)
+    rho_b08 = _media_mascherata(ref["boa"]["B08"], mask)
+    u_b03 = MAPE_ASSUNTO * rho_b03
+    u_b08 = MAPE_ASSUNTO * rho_b08
+    d_b03 = -rho_b08 / rho_b03 ** 2
+    d_b08 = 1 / rho_b03
+    return float(np.sqrt((d_b03 * u_b03) ** 2 + (d_b08 * u_b08) ** 2))
+
+
 def _riga_banda(band_id: str, risultati: dict, ref: dict, mask: np.ndarray,
                  mc_baseline: dict) -> list:
     rho_propria = _media_mascherata(risultati["boa"][band_id], mask)
@@ -96,14 +118,7 @@ def _riga_ndci(risultati: dict, ref: dict, mask: np.ndarray, mc_baseline: dict) 
     rho_rif = _media_mascherata(ref["ndci"], mask)
     u_propria = 2 * float(mc_baseline["ndci"].std(ddof=1))
 
-    # Propagazione GUM dal 1° ordine: NDCI = (b05-b04)/(b05+b04)
-    rho_b04 = _media_mascherata(ref["boa"]["B04"], mask)
-    rho_b05 = _media_mascherata(ref["boa"]["B05"], mask)
-    u_b04 = MAPE_ASSUNTO * rho_b04
-    u_b05 = MAPE_ASSUNTO * rho_b05
-    d_b04 = -2 * rho_b05 / (rho_b04 + rho_b05) ** 2
-    d_b05 = 2 * rho_b04 / (rho_b04 + rho_b05) ** 2
-    u_rif = float(np.sqrt((d_b04 * u_b04) ** 2 + (d_b05 * u_b05) ** 2))
+    u_rif = _u_rif_ndci(ref, mask)
 
     en, overlap = _en_overlap(rho_propria, rho_rif, u_propria, u_rif)
     return ["NDCI", "Sen2Cor", rho_rif, u_propria,
@@ -115,18 +130,65 @@ def _riga_torbidita(risultati: dict, ref: dict, mask: np.ndarray, mc_baseline: d
     rho_rif = _media_mascherata(ref["turbidity"], mask)
     u_propria = 2 * float(mc_baseline["turbidity"].std(ddof=1))
 
-    # Propagazione GUM dal 1° ordine: Torbidità = b08/b03
-    rho_b03 = _media_mascherata(ref["boa"]["B03"], mask)
-    rho_b08 = _media_mascherata(ref["boa"]["B08"], mask)
-    u_b03 = MAPE_ASSUNTO * rho_b03
-    u_b08 = MAPE_ASSUNTO * rho_b08
-    d_b03 = -rho_b08 / rho_b03 ** 2
-    d_b08 = 1 / rho_b03
-    u_rif = float(np.sqrt((d_b03 * u_b03) ** 2 + (d_b08 * u_b08) ** 2))
+    u_rif = _u_rif_torbidita(ref, mask)
 
     en, overlap = _en_overlap(rho_propria, rho_rif, u_propria, u_rif)
     return ["Torbidità", "Sen2Cor", rho_rif, u_propria,
             f"{u_rif:.5f} (propagato da B03,B08)", en, overlap]
+
+
+def compatibilita_simulata(draws_propria: np.ndarray, y_rif: float, u_rif_estesa: float,
+                           rng: np.random.Generator) -> tuple[float, float, bool]:
+    """Intervallo di copertura al 95% della differenza D = Y_propria - Y_rif
+    (JCGM 101). Y_propria: estrazioni Monte Carlo della stima propria.
+    Y_rif: normale centrata su Sen2Cor con deviazione standard U_rif/2
+    (U_rif è un'incertezza estesa k=2, Tipo B). Correlazione nulla.
+    Compatibili se lo zero cade nell'intervallo."""
+    sigma_rif = u_rif_estesa / 2.0
+    rif = rng.normal(y_rif, sigma_rif, size=draws_propria.size)
+    d = draws_propria - rif
+    lo, hi = np.percentile(d, [2.5, 97.5])
+    return float(lo), float(hi), bool(lo <= 0.0 <= hi)
+
+
+def _indicatori(scena: Scene, ref: dict, mc_baseline: dict):
+    """(nome, y_propria, y_rif, estrazioni MC, U_propria=2σ, U_rif) per ogni indicatore."""
+    mask, ris = scena.mask, scena.risultati
+    out = []
+    for b in BAND_IDS:
+        y_rif = _media_mascherata(ref["boa"][b], mask)
+        out.append((b, _media_mascherata(ris["boa"][b], mask), y_rif, mc_baseline["boa"][b],
+                    MAPE_ASSUNTO * y_rif))
+    out.append(("NDCI", _media_mascherata(ris["ndci"], mask), _media_mascherata(ref["ndci"], mask),
+                mc_baseline["ndci"], _u_rif_ndci(ref, mask)))
+    out.append(("Torbidità", _media_mascherata(ris["turbidity"], mask),
+                _media_mascherata(ref["turbidity"], mask), mc_baseline["turbidity"],
+                _u_rif_torbidita(ref, mask)))
+    return [(n, yp, yr, d, 2 * float(d.std(ddof=1)), ur) for n, yp, yr, d, ur in out]
+
+
+def tabella_en_correlazione(rac: RaccoglitoreTabelle, indicatori, rs=(0.0, 0.5, 1.0)) -> None:
+    """E_n con denominatore sqrt(Up² + Ur² - 2 r Up Ur) per alcuni valori di r."""
+    righe = []
+    for nome, yp, yr, _, up, ur in indicatori:
+        riga = [nome, yp - yr, up, ur]
+        for r in rs:
+            den = np.sqrt(max(up**2 + ur**2 - 2 * r * up * ur, 0.0))
+            riga.append((yp - yr) / den if den > 0 else float("nan"))
+        righe.append(riga)
+    rac.aggiungi("Errore normalizzato per diversi valori del coefficiente di correlazione",
+                 ["Indicatore", "Δ (propria − Sen2Cor)", "U_propria (2σ)", "U_rif"]
+                 + [f"E_n (r = {r:g})" for r in rs], righe)
+
+
+def tabella_differenza_simulata(rac: RaccoglitoreTabelle, indicatori, rng_seed: int = 42) -> None:
+    rng = np.random.default_rng(rng_seed)
+    righe = []
+    for nome, _, yr, draws, _, ur in indicatori:
+        lo, hi, contiene = compatibilita_simulata(draws, yr, ur, rng)
+        righe.append([nome, f"[{lo:.4f}; {hi:.4f}]", contiene])
+    rac.aggiungi("Differenza simulata D = Y_propria − Y_rif (intervallo di copertura al 95%)",
+                 ["Indicatore", "Intervallo di D al 95%", "Contiene lo zero?"], righe)
 
 
 def tabella_en(rac: RaccoglitoreTabelle, scena: Scene, mc_baseline: dict) -> None:
@@ -149,17 +211,21 @@ def tabella_en(rac: RaccoglitoreTabelle, scena: Scene, mc_baseline: dict) -> Non
     righe.append(_riga_torbidita(scena.risultati, ref, mask, mc_baseline))
     rac.aggiungi(titolo, _INTESTAZIONI, righe)
 
+    indicatori = _indicatori(scena, ref, mc_baseline)
+    tabella_en_correlazione(rac, indicatori)
+    tabella_differenza_simulata(rac, indicatori)
+
 
 def main() -> None:
     # Standalone: rilancia la Monte Carlo AOD (lenta) solo per questa
     # tabella. Se la usi insieme alle altre, preferisci chiamare
     # tabella_en() da esempio_esecuzione.py riusando mc_baseline.
     from report_incertezza import N_DRAWS, RNG_SEED
-    from processing import monte_carlo_area_means
+    from processing import monte_carlo_area_means_fast
     from Py6S import AeroProfile
 
     scena = load_scene()
-    mc_baseline = monte_carlo_area_means(
+    mc_baseline = monte_carlo_area_means_fast(
         scena.radiance, scena.meta, scena.atmos, scena.mask,
         aero_profile=AeroProfile.Maritime, spectral_mode="boxcar",
         n_draws=N_DRAWS, rng_seed=RNG_SEED, label="Maritime x Boxcar",

@@ -682,6 +682,161 @@ def monte_carlo_area_means(radiance: dict[str, np.ndarray], meta: S2L1CMetadata,
     return {"boa": draws_boa, "ndci": draws_ndci, "turbidity": draws_turb}
 
 
+N_GRIGLIA_6S = 41
+PASSO_GRIGLIA_FINE = 0.0002
+N_VERIFICA_ESTRAZIONI = 2000
+
+
+def _medie_area(rad_acqua: dict[str, np.ndarray], coef: dict[str, tuple]) -> dict:
+    """Medie d'area di BOA, NDCI e torbidità per una terna di coefficienti per
+    banda, con le stesse funzioni (e soglie) usate nel resto della pipeline."""
+    boa = {b: invert_to_boa.fn(rad_acqua[b], *coef[b]) for b in rad_acqua}
+    ndci = compute_ndci.fn(boa["B04"], boa["B05"])
+    turb = compute_turbidity_index.fn(boa["B03"], boa["B08"])
+    return {
+        "boa": {b: float(np.nanmean(v)) for b, v in boa.items()},
+        "ndci": float(np.nanmean(ndci)),
+        "turbidity": float(np.nanmean(turb)),
+    }
+
+
+def _appiattisci(medie: dict) -> dict[str, float]:
+    out = {f"boa_{b}": v for b, v in medie["boa"].items()}
+    out["ndci"] = medie["ndci"]
+    out["turbidity"] = medie["turbidity"]
+    return out
+
+
+@task
+def monte_carlo_area_means_fast(radiance: dict[str, np.ndarray], meta: S2L1CMetadata,
+                                 atmos: AtmosphericParams, mask: np.ndarray,
+                                 aero_profile: int | None = None,
+                                 spectral_mode: str = "boxcar",
+                                 srf_satellite: str = "S2A",
+                                 n_draws: int = 1_000_000, rng_seed: int = 42,
+                                 label: str = "",
+                                 n_test_interpolazione: int = 5,
+                                 n_verifica_estrazioni: int = N_VERIFICA_ESTRAZIONI) -> dict:
+    """Stessa Monte Carlo di monte_carlo_area_means (stessa distribuzione
+    dell'AOD, stesso seme, stessi negativi portati a zero, stessa maschera),
+    ma con 6S tabulato su griglia: vedi commento sopra.
+
+    Con lo stesso seme le prime estrazioni di AOD coincidono con quelle
+    della versione lenta (numpy genera la stessa sequenza in blocco o una
+    alla volta)."""
+    from scipy.interpolate import CubicSpline
+
+    if atmos.aod_uncertainty is None:
+        raise ValueError("atmos.aod_uncertainty non impostata.")
+    profile = aero_profile if aero_profile is not None else atmos.aero_profile
+    prefix = f"[{label}] " if label else ""
+
+    rng = np.random.default_rng(rng_seed)
+    aods = np.maximum(0.0, rng.normal(atmos.aod_550, atmos.aod_uncertainty, n_draws))
+
+    # griglia di 6S: da 0 a un massimo che copre tutte le estrazioni
+    aod_max = max(0.8, float(np.ceil(aods.max() * 10) / 10))
+    griglia = np.linspace(0.0, aod_max, N_GRIGLIA_6S)
+
+    def params(aod: float) -> AtmosphericParams:
+        return AtmosphericParams(aod_550=float(aod), aero_profile=profile,
+                                 atmos_profile=atmos.atmos_profile)
+
+    band_ids = list(radiance.keys())
+    t0 = time.monotonic()
+    spline = {}
+    for b in band_ids:
+        tab = np.array([build_6s_coefficients.fn(_BANDS_BY_ID[b], meta, params(a),
+                                                 spectral_mode, srf_satellite)
+                        for a in griglia])            # (N_GRIGLIA_6S, 3): xa, xb, xc
+        spline[b] = CubicSpline(griglia, tab, axis=0)
+        print(f"{prefix}tabella 6S {b}: {N_GRIGLIA_6S} run "
+              f"({time.monotonic() - t0:.0f}s)", flush=True)
+
+    def coef_interp(aod: float) -> dict[str, tuple]:
+        return {b: tuple(float(c) for c in spline[b](aod)) for b in band_ids}
+
+    # medie d'area su tutti i pixel d'acqua, sulla griglia fine
+    rad_acqua = {b: radiance[b][mask] for b in band_ids}
+    fine = np.arange(0.0, aod_max + PASSO_GRIGLIA_FINE / 2, PASSO_GRIGLIA_FINE)
+    righe = [_appiattisci(_medie_area(rad_acqua, coef_interp(a))) for a in fine]
+    tab_fine = {k: np.array([r[k] for r in righe]) for k in righe[0]}
+    print(f"{prefix}griglia fine: {fine.size} valori di AOD "
+          f"({time.monotonic() - t0:.0f}s)", flush=True)
+
+    # estrazioni: interpolazione lineare sulla griglia fine
+    def valuta(a: np.ndarray, chiave: str) -> np.ndarray:
+        return np.interp(a, fine, tab_fine[chiave])
+
+    out = {
+        "boa": {b: valuta(aods, f"boa_{b}") for b in band_ids},
+        "ndci": valuta(aods, "ndci"),
+        "turbidity": valuta(aods, "turbidity"),
+        "aod": aods,
+        "info": {
+            "metodo": "6S tabulato su griglia + interpolazione",
+            "n_draws": int(n_draws),
+            "n_nodi_6s": N_GRIGLIA_6S,
+            "aod_max_griglia": aod_max,
+            "passo_griglia_fine": PASSO_GRIGLIA_FINE,
+            "frazione_aod_zero": float(np.mean(aods == 0.0)),
+        },
+    }
+
+    # verifica: 6S diretto in punti di AOD a metà tra due nodi
+    if n_test_interpolazione:
+        out["verifica"] = verifica_interpolazione(
+            rad_acqua, meta, atmos, profile, spectral_mode, srf_satellite,
+            griglia, valuta, n_test_interpolazione,
+        )
+        # calcolo esatto (coefficienti dalla spline, nessuna griglia fine)
+        # sulle prime n_verifica_estrazioni estrazioni
+        m = min(n_verifica_estrazioni, n_draws)
+        esatto = [_appiattisci(_medie_area(rad_acqua, coef_interp(a))) for a in aods[:m]]
+        out["verifica"]["n_estrazioni"] = m
+        out["verifica"]["estrazioni"] = {}
+        for k in esatto[0]:
+            e = np.array([r[k] for r in esatto])
+            t = valuta(aods[:m], k)
+            out["verifica"]["estrazioni"][k] = {
+                "max_abs": float(np.max(np.abs(t - e))),
+                "sigma_esatta": float(e.std(ddof=1)),
+                "sigma_tabulata": float(t.std(ddof=1)),
+                "pct_esatti": np.percentile(e, [2.5, 97.5]).tolist(),
+                "pct_tabulati": np.percentile(t, [2.5, 97.5]).tolist(),
+            }
+        v = out["verifica"]
+        print(f"{prefix}verifica: max |diff| NDCI vs 6S diretto = {v['max_abs']['ndci']:.2e}; "
+              f"su {m} estrazioni = {v['estrazioni']['ndci']['max_abs']:.2e} "
+              f"({time.monotonic() - t0:.0f}s)", flush=True)
+    return out
+
+
+def verifica_interpolazione(rad_acqua, meta, atmos, profile, spectral_mode,
+                            srf_satellite, griglia, valuta, n_test) -> dict:
+    """Confronta la tabulazione con 6S eseguito direttamente in n_test valori
+    di AOD scelti a metà tra due nodi della griglia (dove l'errore di
+    interpolazione è massimo) e a metà tra due punti della griglia fine,
+    vicino alla parte centrale della distribuzione."""
+    obiettivi = atmos.aod_550 + atmos.aod_uncertainty * np.array([-0.5, 0.0, 1.0, 2.0, 3.0])
+    obiettivi = np.clip(obiettivi, griglia[0], griglia[-1])[:n_test]
+    idx = np.clip(np.searchsorted(griglia, obiettivi) - 1, 0, griglia.size - 2)
+    test = np.unique((griglia[idx] + griglia[idx + 1]) / 2 + PASSO_GRIGLIA_FINE / 2)
+
+    diff = {}
+    for a in test:
+        p = AtmosphericParams(aod_550=float(a), aero_profile=profile,
+                              atmos_profile=atmos.atmos_profile)
+        coef = {b: build_6s_coefficients.fn(_BANDS_BY_ID[b], meta, p,
+                                            spectral_mode, srf_satellite)
+                for b in rad_acqua}
+        diretto = _appiattisci(_medie_area(rad_acqua, coef))
+        for k, v in diretto.items():
+            diff.setdefault(k, []).append(abs(float(valuta(np.array([a]), k)[0]) - v))
+    return {"aod_test": test.tolist(),
+            "max_abs": {k: float(max(v)) for k, v in diff.items()}}
+
+
 # Confronto con prodotto di riferimento
 
 @task

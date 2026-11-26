@@ -21,6 +21,10 @@ BAND_IDS = ["B03", "B04", "B05", "B08"]
 MAX_CLOUD_COVER = 10.0
 AOD_UNCERTAINTY_FROM_LITERATURE = 0.11
 
+SCENE_START = dt.date(2026, 9, 4)
+SCENE_END = dt.date(2026, 9, 5)        
+EXPECTED_PRODUCT = "S2C_MSIL1C_20260904T100551_N0512_R022_T32TNP_20260904T142309"
+
 # Da adattare se la scena elaborata cambia.
 GRANULE_NAME = "L2A_T32TNP_A010431_20260904T101800"
 TILE_ID = "T32TNP"
@@ -57,10 +61,12 @@ class Scene:
         return self.risultati["meta"]
 
 
-def load_scene(max_products: int = 1, use_s3: bool = False) -> Scene:
-
-    end_date = dt.date.today()
-    start_date = end_date - dt.timedelta(days=90)
+def load_scene(max_products: int = 1, use_s3: bool = False,
+               start_date: dt.date = SCENE_START, end_date: dt.date = SCENE_END,
+               expected_product: str | None = EXPECTED_PRODUCT) -> Scene:
+    """Per tornare alla ricerca sugli ultimi 90 giorni:
+    load_scene(start_date=dt.date.today() - dt.timedelta(days=90),
+               end_date=dt.date.today(), expected_product=None)"""
 
     ingested_products = ingestion_flow(
         bbox=BBOX,
@@ -81,6 +87,11 @@ def load_scene(max_products: int = 1, use_s3: bool = False) -> Scene:
         )
 
     primo = ingested_products[0]
+    if expected_product and primo.product.name.removesuffix(".SAFE") != expected_product:
+        raise RuntimeError(
+            f"Selezionato {primo.product.name}, atteso {expected_product} (scena della "
+            "tesi). Controlla SCENE_START/SCENE_END in common.py."
+        )
     print(
         f"Prodotto selezionato: {primo.product.name}  "
         f"nubi={primo.product.cloud_cover}  "

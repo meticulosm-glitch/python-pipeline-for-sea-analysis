@@ -8,10 +8,12 @@ Unico punto di lancio: `python esempio_esecuzione.py` esegue in sequenza
   2. tabelle di scena e risultati (report_risultati): stampate a schermo
      e scritte in risultati_tesi.md
   3. mappe e figure (report_mappe): cartella figure/
-  4. tabelle di incertezza (report_incertezza, LENTA: molte run di 6S):
+  4. tabelle di incertezza (report_incertezza, LENTA: ~570 run di 6S,
+     6S tabulato su griglia di AOD e interpolato, 10^6 estrazioni):
      aggiunte allo stesso risultati_tesi.md
-  5. tabella di compatibilità metrologica En vs Sen2Cor (report_en):
-     riusa la Monte Carlo AOD già calcolata al punto 4, nessuna run
+  5. tabella di compatibilità metrologica En vs Sen2Cor (report_en),
+     E_n per r = 0; 0,5; 1 e intervallo al 95% della differenza simulata
+     D = Y_propria − Y_rif: riusa la Monte Carlo del punto 4, nessuna run
      aggiuntiva di 6S
 
 Le parti veloci girano per prime, e il .md viene scritto dopo ogni fase:
@@ -49,7 +51,9 @@ GENERA_MAPPE = True
 GENERA_TABELLE_INCERTEZZA = True   # False = salta la parte lenta (Monte Carlo)
                                     # (salta anche la tabella En: ha bisogno
                                     # della stessa Monte Carlo per U_propria)
-N_DRAWS = 100                       # draw Monte Carlo per combinazione (§3.1 tesi)
+N_DRAWS = 1_000_000                 # estrazioni Monte Carlo per combinazione (§3.2 tesi).
+                                    # Con 6S tabulato il costo non dipende da N:
+                                    # 10^6 è il valore indicato da JCGM 101 §7.2.
 
 
 def main() -> None:
