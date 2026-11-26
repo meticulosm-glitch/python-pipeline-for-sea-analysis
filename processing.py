@@ -452,6 +452,35 @@ def get_aod_from_cams(lat: float, lon: float, when: dt.datetime,
     ) from last_error
 
 
+def aod_da_aux_camsfo(path: str | Path, lat: float, lon: float,
+                      variabile: str = "aod550") -> float:
+    import eccodes
+
+    with open(path, "rb") as f:
+        while (h := eccodes.codes_grib_new_from_file(f)) is not None:
+            try:
+                if eccodes.codes_get(h, "shortName") != variabile:
+                    continue
+                g = lambda k: eccodes.codes_get(h, k)
+                ni, nj = g("Ni"), g("Nj")
+                lat1, lat2 = g("latitudeOfFirstGridPointInDegrees"), g("latitudeOfLastGridPointInDegrees")
+                lon1, lon2 = g("longitudeOfFirstGridPointInDegrees"), g("longitudeOfLastGridPointInDegrees")
+                valori = eccodes.codes_get_values(h).reshape(nj, ni)
+            finally:
+                eccodes.codes_release(h)
+            lats, lons = np.linspace(lat1, lat2, nj), np.linspace(lon1, lon2, ni)
+            if lats[0] > lats[-1]:
+                lats, valori = lats[::-1], valori[::-1]
+            i = int(np.clip(np.searchsorted(lats, lat) - 1, 0, nj - 2))
+            j = int(np.clip(np.searchsorted(lons, lon) - 1, 0, ni - 2))
+            ty = (lat - lats[i]) / (lats[i + 1] - lats[i])
+            tx = (lon - lons[j]) / (lons[j + 1] - lons[j])
+            v = valori[i:i + 2, j:j + 2]
+            return float((1 - ty) * ((1 - tx) * v[0, 0] + tx * v[0, 1])
+                         + ty * ((1 - tx) * v[1, 0] + tx * v[1, 1]))
+    raise ValueError(f"{variabile} non trovato in {path}")
+
+
 @task
 def get_aod_from_aeronet(aeronet_csv_path: str, when: dt.datetime) -> AtmosphericParams:
     raise NotImplementedError("Implementa il parsing AERONET qui.")
@@ -465,12 +494,20 @@ _S2_SRF_ATTR = {
 }
 
 
+def _percorso_6s() -> str | None:
+    candidati = [os.environ.get("SIXS_PATH", ""), Path(__file__).resolve().parent / "6S" / "build" / "sixs"]
+    for c in candidati:
+        if c and Path(c).is_file() and os.access(c, os.X_OK):
+            return str(c)
+    return None
+
+
 @task
 def build_6s_coefficients(band: S2Band, meta: S2L1CMetadata,
                            atmos: AtmosphericParams,
                            spectral_mode: str = "boxcar",
                            srf_satellite: str = "S2A") -> tuple[float, float, float]:
-    s = SixS()
+    s = SixS(_percorso_6s())
 
     s.geometry = Geometry.User()
     s.geometry.solar_z = meta.sun_zenith_deg

@@ -13,6 +13,7 @@ from ingestion import IngestedProduct, ingestion_flow
 from processing import (
     AtmosphericParams,
     S2L1CMetadata,
+    aod_da_aux_camsfo,
     get_aod_from_cams,
     processing_flow,
 )
@@ -97,12 +98,23 @@ def load_scene(cfg: Configurazione) -> Scene:
         atmos = AtmosphericParams(aod_550=cfg.aod, aod_uncertainty=cfg.incertezza_aod,
                                   source="manuale")
     else:
-        atmos = get_aod_from_cams(
-            lat=center_lat,
-            lon=center_lon,
-            when=sensing_datetime,
-            aod_uncertainty=cfg.incertezza_aod,
-        )
+        aod = None
+        aux = Path(primo.tile_metadata_path).parent / "AUX_DATA" / "AUX_CAMSFO"
+        if cfg.fonte_aod == "prodotto" and aux.is_file():
+            try:
+                aod = aod_da_aux_camsfo(aux, center_lat, center_lon)
+            except Exception as exc:
+                print(f"AUX_CAMSFO non leggibile ({exc}): uso ADS")
+        if aod is not None:
+            atmos = AtmosphericParams(aod_550=aod, aod_uncertainty=cfg.incertezza_aod,
+                                      source="cams-aux-l1c")
+        else:
+            atmos = get_aod_from_cams(
+                lat=center_lat,
+                lon=center_lon,
+                when=sensing_datetime,
+                aod_uncertainty=cfg.incertezza_aod,
+            )
     print(f"Scena {primo.product.name}, AOD {atmos.aod_550:.3f} ({atmos.source})")
 
     risultati = processing_flow(ingested=primo, atmos=atmos, bbox=area.bbox)

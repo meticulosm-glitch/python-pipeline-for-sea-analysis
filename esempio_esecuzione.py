@@ -52,6 +52,8 @@ def crea_parser() -> argparse.ArgumentParser:
 
     g = p.add_argument_group("altri parametri")
     g.add_argument("--seme", type=int, help="seme del generatore (default 42)")
+    g.add_argument("--fonte-aod", choices=["prodotto", "ads"],
+                   help="AOD da AUX_CAMSFO del prodotto L1C (default) o da ADS")
     g.add_argument("--aod", type=float, help="AOD a 550 nm fisso, senza scaricarlo da CAMS")
     g.add_argument("--incertezza-aod", type=float, help="1σ dell'AOD (default 0,11)")
     g.add_argument("--max-nubi", type=float, help="copertura nuvolosa massima in %% (default 10)")
@@ -118,6 +120,7 @@ def configurazione_da_argomenti(args: argparse.Namespace) -> Configurazione:
     base = cfg or Configurazione(area=area, precisione=prec)
     altri = {k: v for k, v in {
         "seme": args.seme, "incertezza_aod": args.incertezza_aod, "aod": args.aod,
+        "fonte_aod": args.fonte_aod,
         "max_nubi": args.max_nubi, "srf_satellite": args.srf, "cartella_output": args.output,
     }.items() if v is not None}
     if args.s3:

@@ -42,7 +42,8 @@ incertezza dell'AOD, nubi massime e SRF (`--seme`, `--incertezza-aod`,
 Ogni esecuzione scrive in `risultati/<area>_<precisione>/`:
 
 - `risultati_default.md`: tutte le tabelle (riscritto dopo ognuna)
-- `figure/`: mappe, `convergenza_mc.png`, `distribuzioni_mc.png`
+- `figure/`: mappe, `convergenza_mc.png`, `distribuzioni_mc.png`, `funzione_misura.png`
+- `tabulazione_aod.csv`: medie d'area in funzione dell'AOD
 - `configurazione.json`: i parametri usati; per ripetere l'esecuzione
   `python esempio_esecuzione.py --config risultati/.../configurazione.json`
 
@@ -65,7 +66,13 @@ Ogni esecuzione scrive in `risultati/<area>_<precisione>/`:
 ## Prerequisiti
 
 1. `pip install -r requirements.txt`
-2. Binario 6S compilato: https://github.com/robintw/6S
+2. 6S compilato in `6S/build/sixs` (oppure indicato con `SIXS_PATH`):
+   ```bash
+   cd 6S && mkdir -p build
+   gfortran -std=legacy -ffixed-line-length-none -fno-f2c -O3 -funroll-all-loops -ffpe-summary=none -o build/sixs src/*.f
+   ```
+   `src/main.f` è modificato (formato 944) per scrivere i coefficienti xa, xb, xc
+   con 8 cifre significative invece di 5 decimali; l'originale è `src/main.f.orig`.
 3. Credenziali CDSE (Copernicus Data Space Ecosystem) in `.env`
 4. Credenziali CAMS/ADS in `.cdsapirc`
 5. Per il confronto con Sen2Cor: prodotto L2A in `GRANULE/`

@@ -161,6 +161,57 @@ def figura_distribuzioni(mc: dict, ns: list[int], path: Path) -> Path:
     return path
 
 
+def figura_funzione_misura(mc: dict, path: Path) -> Path:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    tab, info = mc["tabulazione"], mc["info"]
+    x_max = float(np.percentile(mc["aod"], 99.9))
+    sel = tab["aod"] <= x_max
+    fig, axes = plt.subplots(3, 1, figsize=(7.5, 8), sharex=True, constrained_layout=True,
+                             gridspec_kw={"height_ratios": [1, 2, 2]})
+
+    ax = axes[0]
+    a = mc["aod"]
+    ax.hist(a[a > 0], bins=np.linspace(0, x_max, 80), density=True, color=BLU,
+            edgecolor="white", linewidth=0.3)
+    ax.set_title(f"Distribuzione dell'AOD (normale {info['aod_media']:.3f} ± "
+                 f"{info['aod_sigma']:.2f}; {info['frazione_aod_zero']:.0%} delle estrazioni a 0)",
+                 fontsize=9, color=TESTO, loc="left")
+    ax.set_yticks([])
+
+    for ax, (k, nome) in zip(axes[1:], GRANDEZZE):
+        ax.plot(tab["aod"][sel], tab[k][sel], color=BLU, linewidth=1.5)
+        ax.set_title(f"{nome} medio sui pixel d'acqua", fontsize=9, color=TESTO, loc="left")
+        ax.set_ylabel(nome, color=TESTO, fontsize=9)
+        ax.grid(True, color=GRIGLIA, linewidth=0.8)
+        ax.set_axisbelow(True)
+
+    for ax in axes:
+        ax.axvline(info["aod_media"], color=ARANCIO, linewidth=1.2, linestyle=(0, (4, 3)))
+        for lato in ("top", "right"):
+            ax.spines[lato].set_visible(False)
+        ax.tick_params(colors=TESTO_2, labelcolor=TESTO, labelsize=8)
+    axes[-1].set_xlabel("AOD a 550 nm", color=TESTO, fontsize=9)
+    linea = plt.Line2D([], [], color=ARANCIO, linewidth=1.2, linestyle=(0, (4, 3)),
+                       label="AOD di riferimento (CAMS)")
+    fig.legend(handles=[linea], loc="outside lower center", fontsize=9, frameon=False)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=DPI)
+    plt.close(fig)
+    return path
+
+
+def salva_tabulazione(mc: dict, path: Path) -> Path:
+    tab = mc["tabulazione"]
+    chiavi = list(tab)
+    np.savetxt(path, np.column_stack([tab[k] for k in chiavi]), delimiter=",",
+               header=",".join(chiavi), comments="", fmt="%.8g")
+    return path
+
+
 def aggiungi_convergenza(rac: RaccoglitoreTabelle, mc_baseline: dict,
                          cfg: Configurazione, cartella_figure: Path) -> dict:
     p = cfg.precisione
@@ -169,4 +220,6 @@ def aggiungi_convergenza(rac: RaccoglitoreTabelle, mc_baseline: dict,
     tabella_convergenza(rac, studio)
     figura_convergenza(studio, cartella_figure / "convergenza_mc.png")
     figura_distribuzioni(mc_baseline, ns, cartella_figure / "distribuzioni_mc.png")
+    figura_funzione_misura(mc_baseline, cartella_figure / "funzione_misura.png")
+    salva_tabulazione(mc_baseline, cartella_figure.parent / "tabulazione_aod.csv")
     return studio

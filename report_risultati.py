@@ -15,6 +15,8 @@ _AERO_NAMES = {v: k for k, v in vars(AeroProfile).items()
 _AOD_SOURCE_NAMES = {
     "cams-eac4": "CAMS EAC4 (rianalisi)",
     "cams-forecast": "CAMS global atmospheric composition forecasts",
+    "cams-aux-l1c": "CAMS forecast allegato al prodotto L1C (AUX_CAMSFO)",
+    "manuale": "valore impostato manualmente",
 }
 
 

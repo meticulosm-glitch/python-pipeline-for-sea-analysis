@@ -97,6 +97,7 @@ class Configurazione:
     seme: int = 42
     incertezza_aod: float = 0.11
     aod: float | None = None
+    fonte_aod: str = "prodotto"
     max_nubi: float = 10.0
     srf_satellite: str = "S2A"
     use_s3: bool = False
