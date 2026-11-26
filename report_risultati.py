@@ -1,16 +1,12 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
-
 import numpy as np
 from Py6S import AeroProfile, AtmosProfile
 
-from common import BAND_IDS, Scene, describe, load_scene, sen2cor_paths
+from common import BAND_IDS, Scene, describe
 from processing import compare_to_sen2cor
 from tabelle import RaccoglitoreTabelle
-
-OUTPUT_PATH = Path("tabelle_risultati.md")
 
 _ATMOS_NAMES = {v: k for k, v in vars(AtmosProfile).items()
                 if isinstance(v, int) and not k.startswith("_")}
@@ -21,10 +17,6 @@ _AOD_SOURCE_NAMES = {
     "cams-forecast": "CAMS global atmospheric composition forecasts",
 }
 
-
-# --------------------------------------------------------------------------
-# Informazioni sulla scena
-# --------------------------------------------------------------------------
 
 def tabella_info_scena(rac: RaccoglitoreTabelle, scena: Scene) -> None:
     prodotto = scena.ingested.product
@@ -58,7 +50,6 @@ def tabella_info_scena(rac: RaccoglitoreTabelle, scena: Scene) -> None:
 def tabella_incertezza_proxy_ndci(rac, risultati) -> None:
     titolo = "Incertezza NDCI (proxy B05)"
     if "ndci_uncertainty_proxy" not in risultati:
-        print("ATTENZIONE: ndci_uncertainty_proxy assente in risultati.")
         rac.aggiungi(titolo, ["Grandezza", "Media"],
                      [["Incertezza NDCI (proxy B05)", "non disponibile"]])
         return
@@ -68,10 +59,6 @@ def tabella_incertezza_proxy_ndci(rac, risultati) -> None:
           float(np.nanmean(risultati["ndci_uncertainty_proxy"]))]],
     )
 
-
-# --------------------------------------------------------------------------
-# §3.2 / §3.3 — statistiche descrittive
-# --------------------------------------------------------------------------
 
 def _stat_o_errore(arr: np.ndarray, mask: np.ndarray, nome: str) -> dict:
     s = describe(arr, mask, nome)
@@ -107,10 +94,6 @@ def tabella_3_3(rac: RaccoglitoreTabelle, scena: Scene) -> None:
     )
 
 
-# --------------------------------------------------------------------------
-# §3.5 — confronto con Sen2Cor
-# --------------------------------------------------------------------------
-
 _INTESTAZIONI_3_5 = ["Banda / Indicatore", "Riferimento", "Bias", "RMSE", "r",
                      "Normalità residui (p-value)", "Test usato"]
 _RIGA_C2RCC = ["NDCI", "C2RCC/ACOLITE (se confermati)", "—", "—", "—", "—", "—"]
@@ -119,9 +102,10 @@ _RIGA_C2RCC = ["NDCI", "C2RCC/ACOLITE (se confermati)", "—", "—", "—", "�
 def tabella_3_5(rac: RaccoglitoreTabelle, scena: Scene) -> None:
     titolo = "Verifica di compatibilità con la misura di riferimento"
     try:
-        righe_sen2cor = compare_to_sen2cor(scena.risultati, sen2cor_paths())
-    except FileNotFoundError as exc:
-        print(f"\nConfronto Sen2Cor non disponibile: {exc}")
+        if scena.sen2cor_paths is None:
+            raise FileNotFoundError("prodotto Sen2Cor dell'area non trovato in GRANULE/")
+        righe_sen2cor = compare_to_sen2cor(scena.risultati, scena.sen2cor_paths)
+    except FileNotFoundError:
         rac.aggiungi(
             titolo, _INTESTAZIONI_3_5,
             [["Confronto Sen2Cor non disponibile (file mancanti)", "Sen2Cor",
@@ -139,26 +123,9 @@ def tabella_3_5(rac: RaccoglitoreTabelle, scena: Scene) -> None:
     rac.aggiungi(titolo, _INTESTAZIONI_3_5, righe)
 
 
-# --------------------------------------------------------------------------
-# Orchestrazione
-# --------------------------------------------------------------------------
-
 def aggiungi_tabelle(rac: RaccoglitoreTabelle, scena: Scene) -> None:
-    """Aggiunge (e stampa) tutte le tabelle di scena e risultati."""
     tabella_info_scena(rac, scena)
     tabella_incertezza_proxy_ndci(rac, scena.risultati)
     tabella_3_2(rac, scena)
     tabella_3_3(rac, scena)
     tabella_3_5(rac, scena)
-
-
-def main() -> None:
-    scena = load_scene()
-    rac = RaccoglitoreTabelle()
-    aggiungi_tabelle(rac, scena)
-    rac.scrivi_markdown(OUTPUT_PATH)
-    print(f"\nTabelle scritte in {OUTPUT_PATH.resolve()}")
-
-
-if __name__ == "__main__":
-    main()

@@ -1,49 +1,33 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 import numpy as np
-from dotenv import load_dotenv
 from Py6S import AeroProfile
 from scipy import stats
 
-from common import BAND_IDS, Scene, load_scene
+from common import BAND_IDS, Scene
+from config import Configurazione
 from processing import (
     _BANDS_BY_ID,
-    N_GRIGLIA_6S,
     build_6s_coefficients,
     compute_scenario,
     monte_carlo_area_means_fast,
 )
 from tabelle import RaccoglitoreTabelle
 
-N_DRAWS = 1_000_000   # JCGM 101 §7.2: 10^6 per un intervallo al 95%
-RNG_SEED = 42
-SRF_SATELLITE = "S2A"
-OUTPUT_PATH = Path("tabelle_incertezza_4_5_1.md")
+SEME_SHAPIRO = 42
 
-
-# --------------------------------------------------------------------------
-# Statistiche di una distribuzione Monte Carlo
-# --------------------------------------------------------------------------
 
 def shortest_interval(draws: np.ndarray, p: float = 0.95) -> tuple[float, float]:
-    """Intervallo di copertura più corto con probabilità p (JCGM 101 §7.7)."""
     x = np.sort(draws)
     n = x.size
-    k = int(np.ceil(p * n))                       # numero di valori dentro l'intervallo
+    k = int(np.ceil(p * n))
     i = int(np.argmin(x[k - 1:] - x[:n - k + 1]))
     return float(x[i]), float(x[i + k - 1])
 
 
-def mc_stats(draws: np.ndarray, n_max_shapiro: int = 5000, seed: int = RNG_SEED) -> dict:
-    """Statistiche di una serie di estrazioni Monte Carlo (medie d'area per
-    estrazione): media, mediana, sigma, 2 sigma, percentili 2,5/97,5 (intervallo
-    probabilisticamente simmetrico al 95%), intervallo più corto al 95%, IQR e
-    p-value di Shapiro-Wilk. Shapiro è calcolato su un sottocampione di
-    n_max_shapiro estrazioni: scipy non lo supporta oltre 5000 valori (stesso
-    criterio di common.describe)."""
+def mc_stats(draws: np.ndarray, n_max_shapiro: int = 5000, seed: int = SEME_SHAPIRO) -> dict:
     sigma = float(draws.std(ddof=1))
     p025, q1, p50, q3, p975 = np.percentile(draws, [2.5, 25, 50, 75, 97.5])
     lo, hi = shortest_interval(draws, 0.95)
@@ -72,7 +56,6 @@ def _media_mascherata(arr: np.ndarray, mask: np.ndarray) -> float:
 
 
 def _it(x: float, cifre: int = 2) -> str:
-    """Numero con `cifre` cifre significative e virgola decimale (per la tesi)."""
     if x == 0 or not np.isfinite(x):
         return f"{x:g}".replace(".", ",")
     decimali = max(0, cifre - 1 - int(np.floor(np.log10(abs(x)))))
@@ -80,17 +63,12 @@ def _it(x: float, cifre: int = 2) -> str:
 
 
 def _grandezze(scena: Scene, mc: dict) -> list[tuple[str, float, np.ndarray]]:
-    """(nome, valore deterministico, estrazioni MC) per bande e indici."""
     ris, mask = scena.risultati, scena.mask
     g = [(f"ρ_BOA - {b}", _media_mascherata(ris["boa"][b], mask), mc["boa"][b]) for b in BAND_IDS]
     g.append(("NDCI", _media_mascherata(ris["ndci"], mask), mc["ndci"]))
     g.append(("Indice di torbidità", _media_mascherata(ris["turbidity"], mask), mc["turbidity"]))
     return g
 
-
-# --------------------------------------------------------------------------
-# Tabelle (schermo + markdown), nello stesso formato dei placeholder in tesi
-# --------------------------------------------------------------------------
 
 def tabella_4_5_1_2(rac: RaccoglitoreTabelle, scena: Scene, mc_baseline: dict) -> None:
     righe, righe_testo = [], []
@@ -205,58 +183,38 @@ def tabella_incertezza_combinata(rac: RaccoglitoreTabelle, combinazioni: dict) -
     )
 
 
-# --------------------------------------------------------------------------
-# Orchestrazione
-# --------------------------------------------------------------------------
-
-def stima_tempi(meta, atmos, n_draws: int) -> None:
-    """Un run di 6S per farsi un'idea dei tempi totali prima di lanciare
-    tutta la Monte Carlo (3 combinazioni x n_draws x 4 bande, più gli
-    scenari singoli di §4.5.1.3/4.5.1.4)."""
+def stima_tempi(meta, atmos, cfg: Configurazione) -> None:
+    p = cfg.precisione
     t0 = time.monotonic()
-    build_6s_coefficients.fn(_BANDS_BY_ID["B03"], meta, atmos, "boxcar", "S2A")
+    build_6s_coefficients.fn(_BANDS_BY_ID["B03"], meta, atmos, "boxcar", cfg.srf_satellite)
     single_run_s = time.monotonic() - t0
-    # 3 Monte Carlo (baseline + Continental x Boxcar + Maritime x SRF), ognuna con
-    # N_GRIGLIA_6S nodi + 5 punti di verifica per banda: non dipende da n_draws
-    n_mc_runs = 3 * (N_GRIGLIA_6S + 5) * 4
-    n_scenario_runs = 3 * 4 + 4  # 3 profili aerosol (§4.5.1.3) + 1 SRF (§4.5.1.4), 4 bande
+    n_mc_runs = 3 * (p.n_nodi_6s + p.n_test_6s) * 4
+    n_scenario_runs = 3 * 4 + 4
     totale = single_run_s * (n_mc_runs + n_scenario_runs)
-    print(
-        f"\nUn run di 6S impiega ~{single_run_s:.2f}s su questa macchina. "
-        f"Stima per l'analisi di incertezza (~{n_mc_runs + n_scenario_runs} run totali, "
-        f"n_draws={n_draws}): ~{totale / 60:.1f} minuti.\n"
-        "A questo si aggiungono alcuni minuti per combinazione per la griglia fine "
-        "e la verifica (dipende dal numero di pixel d'acqua).\n"
+    print(f"6S: {n_mc_runs + n_scenario_runs} run, ~{totale / 60:.0f} min")
+
+
+def _mc(scena: Scene, cfg: Configurazione, profilo, spectral_mode: str) -> dict:
+    p = cfg.precisione
+    return monte_carlo_area_means_fast(
+        scena.radiance, scena.meta, scena.atmos, scena.mask,
+        aero_profile=profilo, spectral_mode=spectral_mode, srf_satellite=cfg.srf_satellite,
+        n_draws=p.n_estrazioni, rng_seed=cfg.seme,
+        n_test_interpolazione=p.n_test_6s, n_verifica_estrazioni=p.n_verifica_estrazioni,
+        n_nodi_6s=p.n_nodi_6s, passo_griglia_fine=p.passo_griglia_fine,
     )
 
 
-def aggiungi_tabelle(
-    rac: RaccoglitoreTabelle,
-    scena: Scene,
-    n_draws: int = N_DRAWS,
-    rng_seed: int = RNG_SEED,
-    srf_satellite: str = SRF_SATELLITE,
-) -> dict:
-    """Esegue l'analisi di incertezza (§4.5.1.2-4.5.1.5) e aggiunge (e
-    stampa) le relative tabelle al raccoglitore.
-
-    Restituisce mc_baseline (la Monte Carlo AOD-only, Maritime x Boxcar):
-    report_en.py la riusa per calcolare U_propria nella tabella En senza
-    rilanciare la stessa Monte Carlo una seconda volta."""
+def aggiungi_tabelle(rac: RaccoglitoreTabelle, scena: Scene, cfg: Configurazione) -> dict:
     radiance, mask, meta, atmos = scena.radiance, scena.mask, scena.meta, scena.atmos
+    srf = cfg.srf_satellite
 
-    stima_tempi(meta, atmos, n_draws)
+    stima_tempi(meta, atmos, cfg)
 
-    # -- 4.5.1.2: incertezza da AOD (baseline Maritime x Boxcar) -----------
-    mc_baseline = monte_carlo_area_means_fast(
-        radiance, meta, atmos, mask,
-        aero_profile=AeroProfile.Maritime, spectral_mode="boxcar",
-        n_draws=n_draws, rng_seed=rng_seed, label="Maritime x Boxcar",
-    )
-    tabella_info_mc(rac, scena, mc_baseline, rng_seed, srf_satellite)
+    mc_baseline = _mc(scena, cfg, AeroProfile.Maritime, "boxcar")
+    tabella_info_mc(rac, scena, mc_baseline, cfg.seme, srf)
     tabella_4_5_1_2(rac, scena, mc_baseline)
 
-    # -- 4.5.1.3: sensibilità a profilo aerosol (AOD fisso, Boxcar) --------
     scenari_profilo = {}
     for nome_profilo, costante in (
         ("Maritime", AeroProfile.Maritime),
@@ -268,45 +226,16 @@ def aggiungi_tabelle(
         )
     tabella_4_5_1_3(rac, scenari_profilo)
 
-    # -- 4.5.1.4: sensibilità a SRF (Maritime, AOD fisso) --------------------
-    scenario_boxcar = scenari_profilo["Maritime"]  # già calcolato sopra
     scenario_srf = compute_scenario(
         radiance, meta, atmos, mask,
-        aero_profile=AeroProfile.Maritime, spectral_mode="srf", srf_satellite=srf_satellite,
+        aero_profile=AeroProfile.Maritime, spectral_mode="srf", srf_satellite=srf,
     )
-    tabella_sensibilita(rac, scenario_boxcar, scenario_srf, srf_satellite)
+    tabella_sensibilita(rac, scenari_profilo["Maritime"], scenario_srf, srf)
 
-    # -- 4.5.1.5: incertezza combinata (profilo x SRF) ------------------------
-    combinazioni = {"Maritime × Boxcar (riferimento)": mc_baseline}
-    combinazioni["Continental × Boxcar"] = monte_carlo_area_means_fast(
-        radiance, meta, atmos, mask,
-        aero_profile=AeroProfile.Continental, spectral_mode="boxcar",
-        n_draws=n_draws, rng_seed=rng_seed, label="Continental x Boxcar",
-    )
-    combinazioni["Maritime × SRF reale (se disponibile)"] = monte_carlo_area_means_fast(
-        radiance, meta, atmos, mask,
-        aero_profile=AeroProfile.Maritime, spectral_mode="srf", srf_satellite=srf_satellite,
-        n_draws=n_draws, rng_seed=rng_seed, label="Maritime x SRF reale",
-    )
+    combinazioni = {
+        "Maritime × Boxcar (riferimento)": mc_baseline,
+        "Continental × Boxcar": _mc(scena, cfg, AeroProfile.Continental, "boxcar"),
+        "Maritime × SRF reale (se disponibile)": _mc(scena, cfg, AeroProfile.Maritime, "srf"),
+    }
     tabella_incertezza_combinata(rac, combinazioni)
-
-    return mc_baseline
-
-
-def main() -> None:
-    load_dotenv()
-    scena = load_scene()
-    rac = RaccoglitoreTabelle()
-    mc_baseline = aggiungi_tabelle(rac, scena)
-
-    from report_en import tabella_en  # import qui: report_en dipende da
-                                       # report_risultati, che a sua volta
-                                       # non deve dipendere da questo file
-    tabella_en(rac, scena, mc_baseline)
-
-    rac.scrivi_markdown(OUTPUT_PATH)
-    print(f"\nTabelle scritte in {OUTPUT_PATH.resolve()}")
-
-
-if __name__ == "__main__":
-    main()
+    return combinazioni

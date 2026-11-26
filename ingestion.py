@@ -36,15 +36,15 @@ class ProductRef:
 @dataclass
 class IngestedProduct:
     product: ProductRef
-    band_paths: dict[str, str]     # band_id -> path (/vsis3/ or local)
-    metadata_path: str             # MTD_MSIL1C.xml (product level)
-    tile_metadata_path: str        # MTD_TL.xml (level tile — angles sun/view)
+    band_paths: dict[str, str]
+    metadata_path: str
+    tile_metadata_path: str
 
 @dataclass
 class CdseToken:
     access_token: str
     refresh_token: str = ""
-    expires_at: float = 0.0  # epoch seconds
+    expires_at: float = 0.0
 
     def expired(self, skew_s: float = 60.0) -> bool:
         return time.time() >= (self.expires_at - skew_s)
@@ -233,7 +233,7 @@ def configure_gdal_s3_env() -> None:
     os.environ["AWS_S3_ENDPOINT"] = "eodata.dataspace.copernicus.eu"
     os.environ["AWS_ACCESS_KEY_ID"] = os.environ["CDSE_S3_ACCESS_KEY"]
     os.environ["AWS_SECRET_ACCESS_KEY"] = os.environ["CDSE_S3_SECRET_KEY"]
-    os.environ["AWS_VIRTUAL_HOSTING"] = "FALSE"  # richiesto: path-style access
+    os.environ["AWS_VIRTUAL_HOSTING"] = "FALSE"
     os.environ["AWS_HTTPS"] = "YES"
 
 
@@ -295,6 +295,20 @@ def _zip_if_complete(dest_dir: str, product: ProductRef) -> str | None:
     return None
 
 
+def _avanzamento(scaricati: int, totale: int, ultimo: int) -> int:
+    mb = scaricati / 1e6
+    if totale:
+        pct = scaricati * 100 // totale
+        if pct != ultimo:
+            print(f"\rDownload: {pct:3d}% ({mb:.0f}/{totale / 1e6:.0f} MB)",
+                  end="", flush=True)
+        return pct
+    passo = int(mb // 10)
+    if passo != ultimo:
+        print(f"\rDownload: {mb:.0f} MB", end="", flush=True)
+    return passo
+
+
 @task(retries=2, retry_delay_seconds=30)
 def download_product_odata(product: ProductRef, dest_dir: str) -> str:
 
@@ -317,10 +331,15 @@ def download_product_odata(product: ProductRef, dest_dir: str) -> str:
                 "Attendi il retrieve oppure filtra `Online eq true`."
             )
         resp.raise_for_status()
+        totale = int(resp.headers.get("Content-Length") or 0)
+        scaricati, ultimo = 0, -1
         with open(part_path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=1 << 20):
                 if chunk:
                     f.write(chunk)
+                    scaricati += len(chunk)
+                    ultimo = _avanzamento(scaricati, totale, ultimo)
+        print()
     finally:
         resp.close()
 
@@ -336,8 +355,6 @@ def download_product_odata(product: ProductRef, dest_dir: str) -> str:
 
 @task
 def extract_product(zip_path: str, dest_dir: str) -> str:
-    """Estrae lo .zip scaricato e restituisce il path locale della cartella
-    .SAFE risultante (necessaria prima di poter risolvere bande e metadati)."""
     import zipfile
 
     with zipfile.ZipFile(zip_path) as zf:
@@ -430,7 +447,7 @@ def ingestion_flow(bbox: tuple[float, float, float, float],
 
 if __name__ == "__main__":
     ingestion_flow(
-        bbox=(14.20, 40.75, 14.35, 40.85),   # esempio: area costiera di test
+        bbox=(14.20, 40.75, 14.35, 40.85),
         start_date=dt.date(2026, 6, 1),
         end_date=dt.date(2026, 6, 30),
         band_ids=["B03", "B04", "B05", "B08"],

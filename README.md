@@ -1,25 +1,71 @@
-Unico punto di lancio: `python esempio_esecuzione.py` esegue in sequenza
+# Pipeline Sentinel-2 per la qualità dell'acqua
 
-  1. ingestion + elaborazione della scena (common.load_scene)
-  2. tabelle di scena e risultati (report_risultati): stampate a schermo
-     e scritte in risultati_tesi.md
-  3. mappe e figure (report_mappe): cartella figure/
-  4. tabelle di incertezza (report_incertezza, LENTA: molte run di 6S):
-     aggiunte allo stesso risultati_tesi.md
+Unico punto di accesso: `esempio_esecuzione.py`.
 
-Le parti veloci girano per prime, e il .md viene scritto dopo ogni fase:
-se interrompi la parte di incertezza non perdi le tabelle già calcolate.
+```bash
+python esempio_esecuzione.py                        # valori di default, golfo La Spezia
+python esempio_esecuzione.py --precisione rapida    # prova veloce
+python esempio_esecuzione.py --elenca               # aree e precisioni disponibili
+python esempio_esecuzione.py --help                 # tutte le opzioni
+```
 
-Prerequisiti
+## Cosa si può cambiare
 
-1. Dipendenze Python:
-   `pip install prefect Py6S numpy scipy rasterio boto3 cdsapi xarray netCDF4 python-dotenv tabulate matplotlib`
+**Area d'analisi** (predefinite in `config.py`, dizionario `AREE`):
 
-   oppure: 
+```bash
+python esempio_esecuzione.py --bbox 9.70 43.95 9.85 44.05 --data 2026-09-04 --nome cinque-terre
+python esempio_esecuzione.py --bbox ... --da 2026-07-01 --a 2026-09-30 --nome estate
+```
 
-   `pip install -r requirements.txt`
+Con un intervallo di date viene scelta la scena con più copertura dell'area,
+meno nubi e, a parità, la più recente. Il confronto con Sen2Cor usa il
+prodotto L2A dello stesso tile e della stessa data, se è in `GRANULE/`
+(oppure `--sen2cor <cartella>`); se manca, quelle tabelle vengono saltate.
 
-2. Binario 6S compilato https://github.com/robintw/6S
-3. Credenziali CDSE (Copernicus Data Space Ecosystem) da mettere in env
-4. Credenziali CAMS/ADS da mettere in .cdsapirc
-5. (per §3.5 e la mappa dei residui) prodotto Sen2Cor L2A: vedi common.py
+**Precisione** (predefinite in `config.py`, dizionario `PRECISIONI`):
+
+| Nome     | Estrazioni | Nodi 6S | Passo tabulazione | Uso |
+|----------|-----------:|--------:|------------------:|-----|
+| rapida   | 10.000     | 21      | 0,001             | prova del flusso |
+| standard | 100.000    | 41      | 0,0005            | intervalli stabili alla seconda cifra |
+| default     | 1.000.000  | 41      | 0,0002            | valori della default (JCGM 101) |
+
+Ogni valore si può cambiare singolarmente (`--n-estrazioni`, `--nodi-6s`,
+`--passo-griglia`, `--verifica`, `--semi-convergenza`), così come seme,
+incertezza dell'AOD, nubi massime e SRF (`--seme`, `--incertezza-aod`,
+`--max-nubi`, `--srf`). Si possono saltare fasi con `--senza-mappe`,
+`--senza-incertezza`, `--senza-convergenza`.
+
+## Risultati
+
+Ogni esecuzione scrive in `risultati/<area>_<precisione>/`:
+
+- `risultati_default.md`: tutte le tabelle (riscritto dopo ognuna)
+- `figure/`: mappe, `convergenza_mc.png`, `distribuzioni_mc.png`
+- `configurazione.json`: i parametri usati; per ripetere l'esecuzione
+  `python esempio_esecuzione.py --config risultati/.../configurazione.json`
+
+## Moduli
+
+| File | Ruolo |
+|------|-------|
+| `esempio_esecuzione.py` | punto di accesso, riga di comando |
+| `config.py` | aree, livelli di precisione, configurazione |
+| `common.py` | caricamento della scena, ricerca del prodotto Sen2Cor |
+| `ingestion.py` | ricerca e download da CDSE |
+| `processing.py` | lettura, correzione atmosferica 6S, indici, Monte Carlo |
+| `report_risultati.py` | tabelle di scena e confronto pixel per pixel |
+| `report_mappe.py` | mappe |
+| `report_incertezza.py` | Monte Carlo sull'AOD, sensibilità, intervalli di copertura |
+| `report_en.py` | E_n e differenza simulata con Sen2Cor |
+| `report_convergenza.py` | come cambiano i risultati al variare di N |
+| `tabelle.py` | raccolta delle tabelle in Markdown |
+
+## Prerequisiti
+
+1. `pip install -r requirements.txt`
+2. Binario 6S compilato: https://github.com/robintw/6S
+3. Credenziali CDSE (Copernicus Data Space Ecosystem) in `.env`
+4. Credenziali CAMS/ADS in `.cdsapirc`
+5. Per il confronto con Sen2Cor: prodotto L2A in `GRANULE/`

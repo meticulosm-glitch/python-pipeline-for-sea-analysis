@@ -1,67 +1,12 @@
-"""
-report_en.py
-============
-
-Tabella di compatibilità metrologica (numero di En, GUM/ISO) tra la
-stima propria e Sen2Cor, su B03/B04/B05/B08, NDCI e torbidità.
-
-NON esisteva in nessuno dei file del progetto: ricostruita dai valori
-già calcolati a mano dall'autore (vedi nota su MAPE sotto), qui resa
-riproducibile e generalizzata su tutte le bande (la versione precedente
-copriva solo B03/B04, NDCI e torbidità - mancavano B05/B08 perché
-limitata "a mano" a due bande, non per un problema nei dati).
-
-Per ogni Indicatore (banda o indice):
-
-    E_n = (ρ_propria - ρ_riferimento) / sqrt(U_propria² + U_riferimento²)
-    Overlap (compatibilità) se |E_n| <= 1
-
-dove:
-- ρ_riferimento: media Sen2Cor sui pixel d'acqua (stessa maschera di
-  tutte le altre tabelle).
-- U_propria: incertezza ESTESA (k=2) della propagazione Monte Carlo
-  sull'AOD (vedi report_incertezza.py, tabella "Incertezza da AOD") -
-  riusa mc_baseline invece di rilanciare la Monte Carlo una seconda
-  volta.
-- U_riferimento (stima Tipo B): Sen2Cor non pubblica un'incertezza per
-  pixel, quindi si usa una stima di giudizio (Tipo B, GUM §4.3): si
-  assume un errore relativo tipico del 20% (MAPE_ASSUNTO sotto) sulla
-  riflettanza BOA, cioè U_riferimento = MAPE_ASSUNTO * ρ_riferimento.
-  IMPORTANTE PER LA TESI: il 20% è un'assunzione di default, non un
-  valore tratto da un report di validazione Sen2Cor specifico per
-  quest'area/periodo - va dichiarato esplicitamente come tale, e nella
-  versione finale andrebbe sostituito con un valore citabile da
-  letteratura se lo trovi (la nota "MAPE<20%" nella tabella serve
-  proprio a ricordare che è un'assunzione, non una misura).
-  Per NDCI e torbidità, essendo rapporti non lineari delle bande, non
-  si può semplicemente sommare le U delle bande componenti: si propaga
-  con la formula GUM del prim'ordine (Taylor), usando le derivate
-  parziali di NDCI=(B05-B04)/(B05+B04) e Torbidità=B08/B03 calcolate
-  nel punto (ρ_riferimento delle bande componenti), assumendo le
-  incertezze di banda indipendenti (nessun termine di covarianza).
-
-Uso:
-  - da esempio_esecuzione.py (consigliato): tabella_en(rac, scena, mc_baseline)
-    con mc_baseline = report_incertezza.aggiungi_tabelle(...)
-  - standalone: python report_en.py -> tabelle_en.md (rilancia anche la
-    Monte Carlo AOD, quindi è lento: vedi report_incertezza.py)
-"""
-
 from __future__ import annotations
-
-from pathlib import Path
 
 import numpy as np
 
-from common import BAND_IDS, Scene, load_scene, sen2cor_paths
+from common import BAND_IDS, Scene
 from processing import load_sen2cor_reflectance
 from tabelle import RaccoglitoreTabelle
 
-OUTPUT_PATH = Path("tabelle_en.md")
-
-# Assunzione di Tipo B su Sen2Cor (vedi docstring sopra): NON è un valore
-# di letteratura specifico per questa scena, è un default dichiarato.
-MAPE_ASSUNTO = 0.20
+MAPE_ASSUNTO = 0.20  # U_rif Sen2Cor: assunzione di Tipo B
 
 _INTESTAZIONI = ["Indicatore", "Riferimento", "ρ_riferimento", "U_propria",
                   "U_riferimento (stima Tipo B)", "E_n", "Overlap? (|E_n|≤1)"]
@@ -81,7 +26,6 @@ def _en_overlap(propria: float, riferimento: float,
 
 
 def _u_rif_ndci(ref: dict, mask: np.ndarray) -> float:
-    """Propagazione GUM dal 1° ordine: NDCI = (b05-b04)/(b05+b04)."""
     rho_b04 = _media_mascherata(ref["boa"]["B04"], mask)
     rho_b05 = _media_mascherata(ref["boa"]["B05"], mask)
     u_b04 = MAPE_ASSUNTO * rho_b04
@@ -92,7 +36,6 @@ def _u_rif_ndci(ref: dict, mask: np.ndarray) -> float:
 
 
 def _u_rif_torbidita(ref: dict, mask: np.ndarray) -> float:
-    """Propagazione GUM dal 1° ordine: Torbidità = b08/b03."""
     rho_b03 = _media_mascherata(ref["boa"]["B03"], mask)
     rho_b08 = _media_mascherata(ref["boa"]["B08"], mask)
     u_b03 = MAPE_ASSUNTO * rho_b03
@@ -106,7 +49,7 @@ def _riga_banda(band_id: str, risultati: dict, ref: dict, mask: np.ndarray,
                  mc_baseline: dict) -> list:
     rho_propria = _media_mascherata(risultati["boa"][band_id], mask)
     rho_rif = _media_mascherata(ref["boa"][band_id], mask)
-    u_propria = 2 * float(mc_baseline["boa"][band_id].std(ddof=1))  # k=2
+    u_propria = 2 * float(mc_baseline["boa"][band_id].std(ddof=1))
     u_rif = MAPE_ASSUNTO * rho_rif
     en, overlap = _en_overlap(rho_propria, rho_rif, u_propria, u_rif)
     return [band_id, "Sen2Cor", rho_rif, u_propria,
@@ -139,11 +82,6 @@ def _riga_torbidita(risultati: dict, ref: dict, mask: np.ndarray, mc_baseline: d
 
 def compatibilita_simulata(draws_propria: np.ndarray, y_rif: float, u_rif_estesa: float,
                            rng: np.random.Generator) -> tuple[float, float, bool]:
-    """Intervallo di copertura al 95% della differenza D = Y_propria - Y_rif
-    (JCGM 101). Y_propria: estrazioni Monte Carlo della stima propria.
-    Y_rif: normale centrata su Sen2Cor con deviazione standard U_rif/2
-    (U_rif è un'incertezza estesa k=2, Tipo B). Correlazione nulla.
-    Compatibili se lo zero cade nell'intervallo."""
     sigma_rif = u_rif_estesa / 2.0
     rif = rng.normal(y_rif, sigma_rif, size=draws_propria.size)
     d = draws_propria - rif
@@ -152,7 +90,6 @@ def compatibilita_simulata(draws_propria: np.ndarray, y_rif: float, u_rif_estesa
 
 
 def _indicatori(scena: Scene, ref: dict, mc_baseline: dict):
-    """(nome, y_propria, y_rif, estrazioni MC, U_propria=2σ, U_rif) per ogni indicatore."""
     mask, ris = scena.mask, scena.risultati
     out = []
     for b in BAND_IDS:
@@ -168,7 +105,6 @@ def _indicatori(scena: Scene, ref: dict, mc_baseline: dict):
 
 
 def tabella_en_correlazione(rac: RaccoglitoreTabelle, indicatori, rs=(0.0, 0.5, 1.0)) -> None:
-    """E_n con denominatore sqrt(Up² + Ur² - 2 r Up Ur) per alcuni valori di r."""
     righe = []
     for nome, yp, yr, _, up, ur in indicatori:
         riga = [nome, yp - yr, up, ur]
@@ -191,15 +127,13 @@ def tabella_differenza_simulata(rac: RaccoglitoreTabelle, indicatori, rng_seed: 
                  ["Indicatore", "Intervallo di D al 95%", "Contiene lo zero?"], righe)
 
 
-def tabella_en(rac: RaccoglitoreTabelle, scena: Scene, mc_baseline: dict) -> None:
-    """Aggiunge (e stampa) la tabella di compatibilità En. mc_baseline è
-    il dict restituito da report_incertezza.aggiungi_tabelle (Monte Carlo
-    Maritime x Boxcar): la riusa invece di rilanciarla."""
+def tabella_en(rac: RaccoglitoreTabelle, scena: Scene, mc_baseline: dict, seme: int = 42) -> None:
     titolo = f"Compatibilità metrologica con Sen2Cor (numero di En, assunto MAPE Sen2Cor {int(MAPE_ASSUNTO*100)}%)"
     try:
-        ref = load_sen2cor_reflectance(scena.risultati, sen2cor_paths())
-    except FileNotFoundError as exc:
-        print(f"\nTabella En non disponibile: {exc}")
+        if scena.sen2cor_paths is None:
+            raise FileNotFoundError("prodotto Sen2Cor dell'area non trovato in GRANULE/")
+        ref = load_sen2cor_reflectance(scena.risultati, scena.sen2cor_paths)
+    except FileNotFoundError:
         rac.aggiungi(titolo, _INTESTAZIONI,
                      [["Confronto Sen2Cor non disponibile (file mancanti)",
                        "Sen2Cor", "—", "—", "—", "—", "—"]])
@@ -213,28 +147,4 @@ def tabella_en(rac: RaccoglitoreTabelle, scena: Scene, mc_baseline: dict) -> Non
 
     indicatori = _indicatori(scena, ref, mc_baseline)
     tabella_en_correlazione(rac, indicatori)
-    tabella_differenza_simulata(rac, indicatori)
-
-
-def main() -> None:
-    # Standalone: rilancia la Monte Carlo AOD (lenta) solo per questa
-    # tabella. Se la usi insieme alle altre, preferisci chiamare
-    # tabella_en() da esempio_esecuzione.py riusando mc_baseline.
-    from report_incertezza import N_DRAWS, RNG_SEED
-    from processing import monte_carlo_area_means_fast
-    from Py6S import AeroProfile
-
-    scena = load_scene()
-    mc_baseline = monte_carlo_area_means_fast(
-        scena.radiance, scena.meta, scena.atmos, scena.mask,
-        aero_profile=AeroProfile.Maritime, spectral_mode="boxcar",
-        n_draws=N_DRAWS, rng_seed=RNG_SEED, label="Maritime x Boxcar",
-    )
-    rac = RaccoglitoreTabelle()
-    tabella_en(rac, scena, mc_baseline)
-    rac.scrivi_markdown(OUTPUT_PATH)
-    print(f"\nTabella scritta in {OUTPUT_PATH.resolve()}")
-
-
-if __name__ == "__main__":
-    main()
+    tabella_differenza_simulata(rac, indicatori, rng_seed=seme)

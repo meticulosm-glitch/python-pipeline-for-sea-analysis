@@ -1,44 +1,47 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from scipy import stats
 
+from config import Configurazione
 from ingestion import IngestedProduct, ingestion_flow
 from processing import (
     AtmosphericParams,
     S2L1CMetadata,
-    default_sen2cor_paths,
     get_aod_from_cams,
     processing_flow,
 )
 
-BBOX = (9.78, 44.00, 9.92, 44.13)  # lon_min, lat_min, lon_max, lat_max
 BAND_IDS = ["B03", "B04", "B05", "B08"]
-MAX_CLOUD_COVER = 10.0
-AOD_UNCERTAINTY_FROM_LITERATURE = 0.11
-
-SCENE_START = dt.date(2026, 9, 4)
-SCENE_END = dt.date(2026, 9, 5)        
-EXPECTED_PRODUCT = "S2C_MSIL1C_20260904T100551_N0512_R022_T32TNP_20260904T142309"
-
-# Da adattare se la scena elaborata cambia.
-GRANULE_NAME = "L2A_T32TNP_A010431_20260904T101800"
-TILE_ID = "T32TNP"
-SENSING_STAMP = "20260904T100551"
 
 
-def sen2cor_paths() -> dict[str, str]:
-    """Path attesi delle 4 bande Sen2Cor, condivisi da report_risultati.py
-    e report_mappe.py (prima erano duplicati in ciascun file)."""
-    base_dir = str(Path(__file__).resolve().parent)
-    return default_sen2cor_paths(
-        base_dir, granule_name=GRANULE_NAME, tile_id=TILE_ID,
-        sensing_stamp=SENSING_STAMP,
-    )
+BASE_DIR = Path(__file__).resolve().parent
+
+
+def trova_sen2cor(nome_prodotto: str, granule: str | None = None) -> dict[str, str] | None:
+    parti = nome_prodotto.removesuffix(".SAFE").split("_")
+    data = parti[2][:8]
+    tile = next((x for x in parti if re.fullmatch(r"T\d{2}[A-Z]{3}", x)), None)
+
+    if granule:
+        candidati = [Path(granule) if Path(granule).is_absolute() else BASE_DIR / granule]
+    else:
+        candidati = sorted((BASE_DIR / "GRANULE").glob(f"L2A_{tile}_*_{data}T*"))
+    for cartella in candidati:
+        img = cartella / "IMG_DATA"
+        paths = {}
+        for band_id, res in (("B03", "10m"), ("B04", "10m"), ("B05", "20m"), ("B08", "10m")):
+            trovati = sorted((img / f"R{res}").glob(f"*_{band_id}_{res}.jp2"))
+            if trovati:
+                paths[band_id] = str(trovati[0])
+        if len(paths) == 4:
+            return paths
+    return None
 
 
 @dataclass
@@ -47,6 +50,7 @@ class Scene:
     ingested: IngestedProduct
     atmos: AtmosphericParams
     risultati: dict
+    sen2cor_paths: dict[str, str] | None = None
 
     @property
     def radiance(self) -> dict[str, np.ndarray]:
@@ -61,63 +65,52 @@ class Scene:
         return self.risultati["meta"]
 
 
-def load_scene(max_products: int = 1, use_s3: bool = False,
-               start_date: dt.date = SCENE_START, end_date: dt.date = SCENE_END,
-               expected_product: str | None = EXPECTED_PRODUCT) -> Scene:
-    """Per tornare alla ricerca sugli ultimi 90 giorni:
-    load_scene(start_date=dt.date.today() - dt.timedelta(days=90),
-               end_date=dt.date.today(), expected_product=None)"""
-
+def load_scene(cfg: Configurazione) -> Scene:
+    area = cfg.area
     ingested_products = ingestion_flow(
-        bbox=BBOX,
-        start_date=start_date,
-        end_date=end_date,
+        bbox=area.bbox,
+        start_date=area.data_inizio,
+        end_date=area.data_fine + dt.timedelta(days=1),  # il filtro CDSE esclude la data finale
         band_ids=BAND_IDS,
         product_type="MSIL1C",
-        max_cloud_cover=MAX_CLOUD_COVER,
-        use_s3=use_s3,
-        max_products=max_products,
+        max_cloud_cover=cfg.max_nubi,
+        use_s3=cfg.use_s3,
+        max_products=1,
     )
     if not ingested_products:
         raise RuntimeError(
-            "Nessun prodotto trovato con questi parametri. Prima di cambiare "
-            "criteri,verifica manualmente su "
-            "https://browser.dataspace.copernicus.eu se esistono scene "
-            "recenti sull'area."
+            f"Nessun prodotto trovato per l'area {area.nome} tra {area.data_inizio} e "
+            f"{area.data_fine} con nubi ≤ {cfg.max_nubi}%. Verifica su "
+            "https://browser.dataspace.copernicus.eu se esistono scene in quelle date."
         )
 
     primo = ingested_products[0]
-    if expected_product and primo.product.name.removesuffix(".SAFE") != expected_product:
+    if area.prodotto_atteso and primo.product.name.removesuffix(".SAFE") != area.prodotto_atteso:
         raise RuntimeError(
-            f"Selezionato {primo.product.name}, atteso {expected_product} (scena della "
-            "tesi). Controlla SCENE_START/SCENE_END in common.py."
+            f"Selezionato {primo.product.name}, atteso {area.prodotto_atteso}. "
+            "Controlla le date dell'area in config.py."
         )
-    print(
-        f"Prodotto selezionato: {primo.product.name}  "
-        f"nubi={primo.product.cloud_cover}  "
-        f"overlap={primo.product.overlap_ratio:.2f}"
-    )
 
-    lon_min, lat_min, lon_max, lat_max = BBOX
-    center_lat = (lat_min + lat_max) / 2
-    center_lon = (lon_min + lon_max) / 2
-
-    # Metto data/ora esatta di acquisizione nei metadati del prodotto
+    center_lat, center_lon = area.centro
     sensing_datetime = dt.datetime.combine(primo.product.sensing_date, dt.time(11, 0))
+    if cfg.aod is not None:
+        atmos = AtmosphericParams(aod_550=cfg.aod, aod_uncertainty=cfg.incertezza_aod,
+                                  source="manuale")
+    else:
+        atmos = get_aod_from_cams(
+            lat=center_lat,
+            lon=center_lon,
+            when=sensing_datetime,
+            aod_uncertainty=cfg.incertezza_aod,
+        )
+    print(f"Scena {primo.product.name}, AOD {atmos.aod_550:.3f} ({atmos.source})")
 
-    atmos = get_aod_from_cams(
-        lat=center_lat,
-        lon=center_lon,
-        when=sensing_datetime,
-        aod_uncertainty=AOD_UNCERTAINTY_FROM_LITERATURE,
-    )
-    print(
-        f"AOD@550nm da CAMS ({atmos.source}): {atmos.aod_550:.4f} "
-        f"(incertezza: {atmos.aod_uncertainty}, DA VERIFICARE)"
-    )
+    risultati = processing_flow(ingested=primo, atmos=atmos, bbox=area.bbox)
 
-    risultati = processing_flow(ingested=primo, atmos=atmos, bbox=BBOX)
-    return Scene(ingested=primo, atmos=atmos, risultati=risultati)
+    sen2cor = trova_sen2cor(primo.product.name, area.sen2cor_granule)
+    if sen2cor is None:
+        print("Sen2Cor non trovato in GRANULE/: confronto saltato")
+    return Scene(ingested=primo, atmos=atmos, risultati=risultati, sen2cor_paths=sen2cor)
 
 
 def describe(
@@ -130,7 +123,7 @@ def describe(
 
     valid = arr[mask & ~np.isnan(arr) & ~np.isinf(arr)]
     if valid.size == 0:
-        print(f"ATTENZIONE - {nome}: nessun pixel valido dopo maschera/filtro NaN-Inf.")
+        print(f"{nome}: nessun pixel valido")
         return None
 
     q1, q3 = np.percentile(valid, [25, 75])

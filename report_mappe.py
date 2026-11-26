@@ -1,62 +1,25 @@
-"""
-report_mappe.py
-================
-
-Genera le figure richieste in §3.2, §3.3 e §3.5 della tesi, sulla stessa
-scena/AOD di esempio_esecuzione.py (che le lancia insieme alle tabelle
-chiamando genera_figure(risultati)); si può anche eseguire da solo
-(python report_mappe.py):
-
-  figure/mappa_boa_b04.png         §3.2  mappa BOA B04 + maschera d'acqua
-  figure/spettro_boa.png           §3.2  spettro medio BOA, barre = IQR
-  figure/mappe_indicatori.png      §3.3  NDCI e torbidità affiancati
-  figure/mappa_residui_ndci.png    §3.5  NDCI propria - NDCI Sen2Cor
-
-NOTE:
-- Le scale colore usano i percentili 2-98 dei pixel d'acqua, non min/max:
-  NDCI e torbidità hanno code estreme (vedi min/max in §3.3) che con
-  min/max schiaccerebbero tutta la scala e renderebbero la mappa
-  illeggibile. La scelta va dichiarata nella didascalia ("scala colore
-  limitata al 2°-98° percentile").
-- I pixel non-acqua sono grigio chiaro, non trasparenti: così la costa
-  resta riconoscibile e si vede subito dove finisce la maschera.
-- La mappa dei residui richiede i file Sen2Cor (stesso path di
-  report_risultati.py); se mancano viene saltata, le altre figure no.
-- Assi in km UTM (la griglia è quella UTM del prodotto L1C).
-- Il pannello di boxplot di §3.4 NON è qui: richiede le distribuzioni
-  Monte Carlo di report_incertezza.py (vedi nota in fondo al file).
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
 
 import matplotlib
 
-matplotlib.use("Agg")  # nessun display richiesto (WSL/server)
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from rasterio.transform import array_bounds
 
-from common import BAND_IDS, load_scene, sen2cor_paths
+from common import BAND_IDS
 from processing import load_sen2cor_reflectance
 
-OUT_DIR = Path("figure")
 DPI = 200
 
-# Lunghezze d'onda centrali (nm) — le stesse di S2_WATER_BANDS (processing.py)
 WAVELENGTH_NM = {"B03": 560, "B04": 665, "B05": 705, "B08": 842}
 
 LAND_COLOR = "#d9d9d9"
 
 
-# --------------------------------------------------------------------------
-# Utilità
-# --------------------------------------------------------------------------
-
 def _extent(risultati: dict) -> tuple[float, float, float, float]:
-    """(left, right, bottom, top) per imshow, in km se la griglia è
-    proiettata (UTM), altrimenti nelle unità native."""
     h, w = risultati["boa"]["B04"].shape
     west, south, east, north = array_bounds(h, w, risultati["grid_transform"])
     scale = 1000.0 if risultati["grid_crs"].is_projected else 1.0
@@ -73,7 +36,6 @@ def _axis_labels(ax, risultati: dict) -> None:
 
 
 def _clean(arr: np.ndarray) -> np.ndarray:
-    """NaN al posto di inf, senza modificare l'originale."""
     out = arr.astype(float, copy=True)
     out[~np.isfinite(out)] = np.nan
     return out
@@ -98,7 +60,6 @@ def _percentile_limits(arr: np.ndarray, lo: float = 2, hi: float = 98,
 
 
 def _draw_land(ax, mask: np.ndarray, extent) -> None:
-    """Sfondo grigio per i pixel non-acqua."""
     land = np.where(mask, np.nan, 1.0)
     ax.imshow(land, cmap=matplotlib.colors.ListedColormap([LAND_COLOR]),
               extent=extent, origin="upper", interpolation="nearest")
@@ -117,10 +78,6 @@ def _map_panel(ax, fig, data: np.ndarray, mask: np.ndarray, extent, risultati,
     cb.set_label(cbar_label + "\n(scala: 2°-98° percentile)", fontsize=8)
 
 
-# --------------------------------------------------------------------------
-# §3.2 — mappa BOA B04 con maschera d'acqua
-# --------------------------------------------------------------------------
-
 def figura_mappa_boa(risultati: dict, path: Path) -> None:
     mask = risultati["water_mask"]
     extent = _extent(risultati)
@@ -128,7 +85,6 @@ def figura_mappa_boa(risultati: dict, path: Path) -> None:
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 5), constrained_layout=True)
 
-    # (a) B04 su tutta la bbox, contorno della maschera sovrapposto
     vmin, vmax = _percentile_limits(b04)
     im1 = ax1.imshow(b04, cmap="gray", vmin=max(vmin, 0), vmax=vmax,
                      extent=extent, origin="upper", interpolation="nearest")
@@ -139,17 +95,12 @@ def figura_mappa_boa(risultati: dict, path: Path) -> None:
     cb1 = fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
     cb1.set_label("ρ_BOA B04 (2°-98° percentile)", fontsize=8)
 
-    # (b) solo pixel d'acqua
     _map_panel(ax2, fig, _water_only(b04, mask), mask, extent, risultati,
                "(b) ρ_BOA B04 — solo pixel d'acqua", "viridis", "ρ_BOA B04")
 
     fig.savefig(path, dpi=DPI)
     plt.close(fig)
 
-
-# --------------------------------------------------------------------------
-# §3.2 — spettro medio BOA con barre IQR
-# --------------------------------------------------------------------------
 
 def figura_spettro(risultati: dict, path: Path) -> None:
     mask = risultati["water_mask"]
@@ -180,10 +131,6 @@ def figura_spettro(risultati: dict, path: Path) -> None:
     plt.close(fig)
 
 
-# --------------------------------------------------------------------------
-# §3.3 — mappe NDCI e torbidità affiancate
-# --------------------------------------------------------------------------
-
 def figura_indicatori(risultati: dict, path: Path) -> None:
     mask = risultati["water_mask"]
     extent = _extent(risultati)
@@ -197,10 +144,6 @@ def figura_indicatori(risultati: dict, path: Path) -> None:
     fig.savefig(path, dpi=DPI)
     plt.close(fig)
 
-
-# --------------------------------------------------------------------------
-# §3.5 — mappa dei residui NDCI (propria - Sen2Cor)
-# --------------------------------------------------------------------------
 
 def figura_residui_ndci(risultati: dict, sen2cor: dict, path: Path) -> None:
     mask = risultati["water_mask"]
@@ -216,12 +159,10 @@ def figura_residui_ndci(risultati: dict, sen2cor: dict, path: Path) -> None:
     plt.close(fig)
 
 
-# --------------------------------------------------------------------------
-# Orchestrazione
-# --------------------------------------------------------------------------
-
-def genera_figure(risultati: dict) -> list[Path]:
-    OUT_DIR.mkdir(exist_ok=True)
+def genera_figure(risultati: dict, out_dir: Path,
+                  sen2cor_paths: dict[str, str] | None) -> list[Path]:
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
     prodotte = []
 
     for nome, fn in (
@@ -229,35 +170,20 @@ def genera_figure(risultati: dict) -> list[Path]:
         ("spettro_boa.png", figura_spettro),
         ("mappe_indicatori.png", figura_indicatori),
     ):
-        p = OUT_DIR / nome
+        p = out_dir / nome
         fn(risultati, p)
         prodotte.append(p)
-        print(f"Scritta {p}")
 
     try:
-        sen2cor = load_sen2cor_reflectance(risultati, sen2cor_paths())
-    except FileNotFoundError as exc:
-        print(f"Mappa residui saltata: {exc}")
+        if sen2cor_paths is None:
+            raise FileNotFoundError("prodotto Sen2Cor dell'area non trovato in GRANULE/")
+        sen2cor = load_sen2cor_reflectance(risultati, sen2cor_paths)
+    except FileNotFoundError:
+        pass
     else:
-        p = OUT_DIR / "mappa_residui_ndci.png"
+        p = out_dir / "mappa_residui_ndci.png"
         figura_residui_ndci(risultati, sen2cor, p)
         prodotte.append(p)
-        print(f"Scritta {p}")
     return prodotte
 
 
-def main() -> None:
-    scena = load_scene()
-    genera_figure(scena.risultati)
-
-
-if __name__ == "__main__":
-    main()
-
-# Boxplot di §3.4 (una scatola per sorgente: AOD, profilo aerosol, SRF,
-# combinata): servono gli array draw Monte Carlo restituiti da
-# monte_carlo_area_means (chiavi "ndci" e "turbidity"), gli stessi che
-# report_incertezza.py usa per le tabelle. Con `combinazioni` come nel
-# suo main():
-#     plt.boxplot([mc["ndci"] for mc in combinazioni.values()],
-#                 labels=list(combinazioni.keys()))

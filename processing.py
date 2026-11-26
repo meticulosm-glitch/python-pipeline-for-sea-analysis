@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import datetime as dt
 import os
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -20,10 +19,8 @@ from Py6S import (
     PredefinedWavelengths, SixS, Wavelength,
 )
 
-from ingestion import CDSE_S3_ENDPOINT, IngestedProduct, ingestion_flow
+from ingestion import CDSE_S3_ENDPOINT, IngestedProduct
 
-
-# Parametri Bande MSI
 
 @dataclass
 class S2Band:
@@ -42,8 +39,6 @@ S2_WATER_BANDS = [
 ]
 _BANDS_BY_ID = {b.band_id: b for b in S2_WATER_BANDS}
 
-
-# Metadati L1C
 
 @dataclass
 class S2L1CMetadata:
@@ -78,7 +73,6 @@ _BAND_ID_ORDER = ["B01", "B02", "B03", "B04", "B05", "B06", "B07",
 
 
 def _xml_root(mtd_path: str) -> ET.Element:
-    """Apre MTD_MSIL1C.xml da path locale o /vsis3/ (ET.parse non parla S3)."""
     if mtd_path.startswith("/vsis3/"):
         import boto3
         rest = mtd_path[len("/vsis3/"):]
@@ -134,8 +128,6 @@ def parse_s2_l1c_metadata(mtd_path: str, tile_mtd_path: str) -> S2L1CMetadata:
     )
 
 
-# Lettura banda e calibrazione radiometrica
-
 def _clip_window(src, bbox: tuple[float, float, float, float] | None) -> Window:
     if bbox is None:
         return Window(0, 0, src.width, src.height)
@@ -151,11 +143,6 @@ def _clip_window(src, bbox: tuple[float, float, float, float] | None) -> Window:
 def load_water_bands(band_paths: dict[str, str],
                      bbox: tuple[float, float, float, float] | None = None
                      ) -> dict:
-    """Legge B03/B04/B05/B08, ritaglia sulla bbox e allinea alla griglia
-    10 m di B04 (B05 nativo è 20 m: senza questo NDCI crasha sulle shape).
-    Restituisce anche transform/crs/shape della griglia comune, necessari
-    per allineare pixel-per-pixel un prodotto di riferimento esterno
-    (Sen2Cor/C2RCC/ACOLITE, §3.5) alla stessa identica griglia."""
     with rasterio.open(band_paths["B04"]) as ref:
         window = _clip_window(ref, bbox)
         if window.width <= 0 or window.height <= 0:
@@ -185,8 +172,6 @@ def load_water_bands(band_paths: dict[str, str],
 
 @task
 def read_band(path: str) -> np.ndarray:
-    """Legge una banda JP2 — path locale o /vsis3/ (trasparente per rasterio,
-    a patto che configure_gdal_s3_env() sia già stato chiamato in ingestion)."""
     with rasterio.open(path) as src:
         return src.read(1)
 
@@ -200,22 +185,18 @@ def dn_to_toa_reflectance(dn: np.ndarray, band: S2Band, meta: S2L1CMetadata) -> 
 @task
 def toa_reflectance_to_radiance(rho_toa: np.ndarray, band: S2Band,
                                  meta: S2L1CMetadata) -> np.ndarray:
-    """ATTENZIONE: verifica la convenzione del fattore U (vedi note in testa
-    al file) prima di usare i risultati in tesi."""
     theta_s = np.radians(meta.sun_zenith_deg)
     esun = meta.solar_irradiance[band.band_id]
     return rho_toa * esun * np.cos(theta_s) * meta.u_earth_sun_distance / np.pi
 
 
-# Parametri atmosferici esterni (AOD)
-
 @dataclass
 class AtmosphericParams:
     aod_550: float
     aod_uncertainty: float | None = None
-    aero_profile: int = AeroProfile.Maritime  # più adatto di Continental per scene costiere/acqua
+    aero_profile: int = AeroProfile.Maritime
     atmos_profile: int = AtmosProfile.MidlatitudeSummer
-    source: str = "cams-eac4"  # "cams-eac4" | "cams-forecast"
+    source: str = "cams-eac4"
 
 
 _EAC4_GRID_DEG = 0.75
@@ -315,7 +296,6 @@ def _select_nearest_time(da, when: dt.datetime):
 def _aod_at_point(ds, lat: float, lon: float, when: dt.datetime) -> float:
     var_name = next((n for n in _AOD_VAR_CANDIDATES if n in ds.data_vars), None)
     if var_name is None:
-        # scarta coord-only / bound vars
         data_vars = [n for n in ds.data_vars if ds[n].ndim >= 2]
         var_name = data_vars[0] if data_vars else list(ds.data_vars)[0]
     da = ds[var_name]
@@ -392,10 +372,8 @@ def get_aod_from_cams(lat: float, lon: float, when: dt.datetime,
     def _log(msg: str) -> None:
         if logger is not None:
             logger.info(msg)
-        else:
-            print(msg)
 
-    client = cdsapi.Client()
+    client = cdsapi.Client(quiet=True)
     day = when.strftime("%Y-%m-%d")
     cache_dir = Path("data/cams")
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -441,6 +419,7 @@ def get_aod_from_cams(lat: float, lon: float, when: dt.datetime,
             if cached.is_file() and cached.stat().st_size > 1000:
                 _log(f"Uso cache CAMS già scaricata: {cached}")
             else:
+                print(f"CAMS: richiesta {dataset} in coda su ADS...", flush=True)
                 client.retrieve(dataset, request, tmp_name)
             ds = _load_cams_dataset(tmp_name)
             try:
@@ -475,11 +454,8 @@ def get_aod_from_cams(lat: float, lon: float, when: dt.datetime,
 
 @task
 def get_aod_from_aeronet(aeronet_csv_path: str, when: dt.datetime) -> AtmosphericParams:
-    """Placeholder: parsing di un file AERONET Level 2.0 locale."""
     raise NotImplementedError("Implementa il parsing AERONET qui.")
 
-
-#coefficienti di inversione e correzione
 
 _S2_SRF_ATTR = {
     "S2A": {"B03": "S2A_MSI_03", "B04": "S2A_MSI_04",
@@ -511,7 +487,7 @@ def build_6s_coefficients(band: S2Band, meta: S2L1CMetadata,
     s.aero_profile = AeroProfile.PredefinedType(atmos.aero_profile)
     s.aot550 = atmos.aod_550
 
-    s.ground_reflectance = GroundReflectance.HomogeneousLambertian(0.02)  # dummy, target scuro (acqua)
+    s.ground_reflectance = GroundReflectance.HomogeneousLambertian(0.02)
 
     s.atmos_corr = AtmosCorr.AtmosCorrLambertianFromRadiance(100)
 
@@ -535,40 +511,24 @@ def invert_to_boa(radiance: np.ndarray, xa: float, xb: float, xc: float) -> np.n
     return y / (1.0 + xc * y)
 
 
-# Parametri di qualità dell'acqua
-
 @task
 def compute_ndci(boa_b04: np.ndarray, boa_b05: np.ndarray,
-                  min_denominator: float = 1e-3,
-                  verbose: bool = False) -> np.ndarray:
+                  min_denominator: float = 1e-3) -> np.ndarray:
 
     denom = boa_b04 + boa_b05
     unstable = np.abs(denom) < min_denominator
     with np.errstate(divide="ignore", invalid="ignore"):
         ndci = (boa_b05 - boa_b04) / denom
-    if verbose:
-        n_unstable = int(unstable.sum())
-        if n_unstable:
-            print(f"compute_ndci: {n_unstable}/{unstable.size} pixel con "
-                  f"denominatore instabile (|B05+B04|<{min_denominator}), "
-                  "impostati a NaN.")
     return np.where(unstable, np.nan, ndci)
 
 
 @task
 def compute_turbidity_index(boa_b03: np.ndarray, boa_b08: np.ndarray,
-                             min_denominator: float = 1e-3,
-                             verbose: bool = False) -> np.ndarray:
+                             min_denominator: float = 1e-3) -> np.ndarray:
 
     unstable = np.abs(boa_b03) < min_denominator
     with np.errstate(divide="ignore", invalid="ignore"):
         turbidity = boa_b08 / boa_b03
-    if verbose:
-        n_unstable = int(unstable.sum())
-        if n_unstable:
-            print(f"compute_turbidity_index: {n_unstable}/{unstable.size} "
-                  f"pixel con denominatore instabile (|B03|<{min_denominator}), "
-                  "impostati a NaN.")
     return np.where(unstable, np.nan, turbidity)
 
 
@@ -578,8 +538,6 @@ def water_mask(boa_b03: np.ndarray, boa_b08: np.ndarray,
     ndwi = (boa_b03 - boa_b08) / (boa_b03 + boa_b08)
     return ndwi > threshold
 
-
-# Propagazione dell'incertezza (Monte Carlo su AOD)
 
 @task
 def monte_carlo_uncertainty(dn: np.ndarray, band: S2Band, meta: S2L1CMetadata,
@@ -632,64 +590,12 @@ def compute_scenario(radiance: dict[str, np.ndarray], meta: S2L1CMetadata,
     }
 
 
-@task
-def monte_carlo_area_means(radiance: dict[str, np.ndarray], meta: S2L1CMetadata,
-                            atmos: AtmosphericParams, mask: np.ndarray,
-                            aero_profile: int | None = None,
-                            spectral_mode: str = "boxcar",
-                            srf_satellite: str = "S2A",
-                            n_draws: int = 30, rng_seed: int = 42,
-                            progress_every: int = 10,
-                            label: str = "") -> dict:
-
-    if atmos.aod_uncertainty is None:
-        raise ValueError("atmos.aod_uncertainty non impostata.")
-    profile = aero_profile if aero_profile is not None else atmos.aero_profile
-
-    rng = np.random.default_rng(rng_seed)
-    band_ids = list(radiance.keys())
-    draws_boa = {b: np.empty(n_draws) for b in band_ids}
-    draws_ndci = np.empty(n_draws)
-    draws_turb = np.empty(n_draws)
-
-    t0 = time.monotonic()
-    for i in range(n_draws):
-        perturbed_aod = max(0.0, rng.normal(atmos.aod_550, atmos.aod_uncertainty))
-        perturbed = AtmosphericParams(aod_550=perturbed_aod, aero_profile=profile,
-                                       atmos_profile=atmos.atmos_profile)
-        boa = {}
-        for band_id in band_ids:
-            band = _BANDS_BY_ID[band_id]
-            xa, xb, xc = build_6s_coefficients.fn(
-                band, meta, perturbed, spectral_mode, srf_satellite
-            )
-            boa[band_id] = invert_to_boa.fn(radiance[band_id], xa, xb, xc)
-            draws_boa[band_id][i] = np.nanmean(boa[band_id][mask])
-        ndci = compute_ndci.fn(boa["B04"], boa["B05"])
-        turb = compute_turbidity_index.fn(boa["B03"], boa["B08"])
-        draws_ndci[i] = np.nanmean(ndci[mask])
-        draws_turb[i] = np.nanmean(turb[mask])
-
-        if progress_every and (i + 1) % progress_every == 0:
-            elapsed = time.monotonic() - t0
-            rate = elapsed / (i + 1)
-            remaining = rate * (n_draws - i - 1)
-            prefix = f"[{label}] " if label else ""
-            print(f"{prefix}draw {i + 1}/{n_draws} "
-                  f"({elapsed:.0f}s trascorsi, ~{remaining:.0f}s rimanenti)",
-                  flush=True)
-
-    return {"boa": draws_boa, "ndci": draws_ndci, "turbidity": draws_turb}
-
-
 N_GRIGLIA_6S = 41
 PASSO_GRIGLIA_FINE = 0.0002
 N_VERIFICA_ESTRAZIONI = 2000
 
 
 def _medie_area(rad_acqua: dict[str, np.ndarray], coef: dict[str, tuple]) -> dict:
-    """Medie d'area di BOA, NDCI e torbidità per una terna di coefficienti per
-    banda, con le stesse funzioni (e soglie) usate nel resto della pipeline."""
     boa = {b: invert_to_boa.fn(rad_acqua[b], *coef[b]) for b in rad_acqua}
     ndci = compute_ndci.fn(boa["B04"], boa["B05"])
     turb = compute_turbidity_index.fn(boa["B03"], boa["B08"])
@@ -714,57 +620,43 @@ def monte_carlo_area_means_fast(radiance: dict[str, np.ndarray], meta: S2L1CMeta
                                  spectral_mode: str = "boxcar",
                                  srf_satellite: str = "S2A",
                                  n_draws: int = 1_000_000, rng_seed: int = 42,
-                                 label: str = "",
                                  n_test_interpolazione: int = 5,
-                                 n_verifica_estrazioni: int = N_VERIFICA_ESTRAZIONI) -> dict:
-    """Stessa Monte Carlo di monte_carlo_area_means (stessa distribuzione
-    dell'AOD, stesso seme, stessi negativi portati a zero, stessa maschera),
-    ma con 6S tabulato su griglia: vedi commento sopra.
-
-    Con lo stesso seme le prime estrazioni di AOD coincidono con quelle
-    della versione lenta (numpy genera la stessa sequenza in blocco o una
-    alla volta)."""
+                                 n_verifica_estrazioni: int = N_VERIFICA_ESTRAZIONI,
+                                 n_nodi_6s: int = N_GRIGLIA_6S,
+                                 passo_griglia_fine: float = PASSO_GRIGLIA_FINE) -> dict:
+    # 6S sui nodi di AOD, medie d'area tabulate su griglia fine, estrazioni interpolate
     from scipy.interpolate import CubicSpline
 
     if atmos.aod_uncertainty is None:
         raise ValueError("atmos.aod_uncertainty non impostata.")
     profile = aero_profile if aero_profile is not None else atmos.aero_profile
-    prefix = f"[{label}] " if label else ""
 
     rng = np.random.default_rng(rng_seed)
     aods = np.maximum(0.0, rng.normal(atmos.aod_550, atmos.aod_uncertainty, n_draws))
 
-    # griglia di 6S: da 0 a un massimo che copre tutte le estrazioni
     aod_max = max(0.8, float(np.ceil(aods.max() * 10) / 10))
-    griglia = np.linspace(0.0, aod_max, N_GRIGLIA_6S)
+    griglia = np.linspace(0.0, aod_max, n_nodi_6s)
 
     def params(aod: float) -> AtmosphericParams:
         return AtmosphericParams(aod_550=float(aod), aero_profile=profile,
                                  atmos_profile=atmos.atmos_profile)
 
     band_ids = list(radiance.keys())
-    t0 = time.monotonic()
     spline = {}
     for b in band_ids:
         tab = np.array([build_6s_coefficients.fn(_BANDS_BY_ID[b], meta, params(a),
                                                  spectral_mode, srf_satellite)
-                        for a in griglia])            # (N_GRIGLIA_6S, 3): xa, xb, xc
+                        for a in griglia])
         spline[b] = CubicSpline(griglia, tab, axis=0)
-        print(f"{prefix}tabella 6S {b}: {N_GRIGLIA_6S} run "
-              f"({time.monotonic() - t0:.0f}s)", flush=True)
 
     def coef_interp(aod: float) -> dict[str, tuple]:
         return {b: tuple(float(c) for c in spline[b](aod)) for b in band_ids}
 
-    # medie d'area su tutti i pixel d'acqua, sulla griglia fine
     rad_acqua = {b: radiance[b][mask] for b in band_ids}
-    fine = np.arange(0.0, aod_max + PASSO_GRIGLIA_FINE / 2, PASSO_GRIGLIA_FINE)
+    fine = np.arange(0.0, aod_max + passo_griglia_fine / 2, passo_griglia_fine)
     righe = [_appiattisci(_medie_area(rad_acqua, coef_interp(a))) for a in fine]
     tab_fine = {k: np.array([r[k] for r in righe]) for k in righe[0]}
-    print(f"{prefix}griglia fine: {fine.size} valori di AOD "
-          f"({time.monotonic() - t0:.0f}s)", flush=True)
 
-    # estrazioni: interpolazione lineare sulla griglia fine
     def valuta(a: np.ndarray, chiave: str) -> np.ndarray:
         return np.interp(a, fine, tab_fine[chiave])
 
@@ -776,21 +668,22 @@ def monte_carlo_area_means_fast(radiance: dict[str, np.ndarray], meta: S2L1CMeta
         "info": {
             "metodo": "6S tabulato su griglia + interpolazione",
             "n_draws": int(n_draws),
-            "n_nodi_6s": N_GRIGLIA_6S,
+            "n_nodi_6s": int(n_nodi_6s),
             "aod_max_griglia": aod_max,
-            "passo_griglia_fine": PASSO_GRIGLIA_FINE,
+            "passo_griglia_fine": float(passo_griglia_fine),
             "frazione_aod_zero": float(np.mean(aods == 0.0)),
+            "aod_media": float(atmos.aod_550),
+            "aod_sigma": float(atmos.aod_uncertainty),
+            "seme": int(rng_seed),
         },
+        "tabulazione": {"aod": fine, **tab_fine},
     }
 
-    # verifica: 6S diretto in punti di AOD a metà tra due nodi
     if n_test_interpolazione:
         out["verifica"] = verifica_interpolazione(
             rad_acqua, meta, atmos, profile, spectral_mode, srf_satellite,
-            griglia, valuta, n_test_interpolazione,
+            griglia, valuta, n_test_interpolazione, passo_griglia_fine,
         )
-        # calcolo esatto (coefficienti dalla spline, nessuna griglia fine)
-        # sulle prime n_verifica_estrazioni estrazioni
         m = min(n_verifica_estrazioni, n_draws)
         esatto = [_appiattisci(_medie_area(rad_acqua, coef_interp(a))) for a in aods[:m]]
         out["verifica"]["n_estrazioni"] = m
@@ -805,23 +698,16 @@ def monte_carlo_area_means_fast(radiance: dict[str, np.ndarray], meta: S2L1CMeta
                 "pct_esatti": np.percentile(e, [2.5, 97.5]).tolist(),
                 "pct_tabulati": np.percentile(t, [2.5, 97.5]).tolist(),
             }
-        v = out["verifica"]
-        print(f"{prefix}verifica: max |diff| NDCI vs 6S diretto = {v['max_abs']['ndci']:.2e}; "
-              f"su {m} estrazioni = {v['estrazioni']['ndci']['max_abs']:.2e} "
-              f"({time.monotonic() - t0:.0f}s)", flush=True)
     return out
 
 
 def verifica_interpolazione(rad_acqua, meta, atmos, profile, spectral_mode,
-                            srf_satellite, griglia, valuta, n_test) -> dict:
-    """Confronta la tabulazione con 6S eseguito direttamente in n_test valori
-    di AOD scelti a metà tra due nodi della griglia (dove l'errore di
-    interpolazione è massimo) e a metà tra due punti della griglia fine,
-    vicino alla parte centrale della distribuzione."""
+                            srf_satellite, griglia, valuta, n_test,
+                            passo_griglia_fine: float = PASSO_GRIGLIA_FINE) -> dict:
     obiettivi = atmos.aod_550 + atmos.aod_uncertainty * np.array([-0.5, 0.0, 1.0, 2.0, 3.0])
     obiettivi = np.clip(obiettivi, griglia[0], griglia[-1])[:n_test]
     idx = np.clip(np.searchsorted(griglia, obiettivi) - 1, 0, griglia.size - 2)
-    test = np.unique((griglia[idx] + griglia[idx + 1]) / 2 + PASSO_GRIGLIA_FINE / 2)
+    test = np.unique((griglia[idx] + griglia[idx + 1]) / 2 + passo_griglia_fine / 2)
 
     diff = {}
     for a in test:
@@ -836,8 +722,6 @@ def verifica_interpolazione(rad_acqua, meta, atmos, profile, spectral_mode,
     return {"aod_test": test.tolist(),
             "max_abs": {k: float(max(v)) for k, v in diff.items()}}
 
-
-# Confronto con prodotto di riferimento
 
 @task
 def align_reference_band(path: str, target_shape: tuple[int, int],
@@ -908,15 +792,12 @@ def compare_to_reference(own: np.ndarray, reference: np.ndarray,
     }
 
 
-# Flow di elaborazione
-
 @flow(name="processing-water-quality")
 def processing_flow(ingested: IngestedProduct, atmos: AtmosphericParams,
                      reference_ndci_path: str | None = None,
                      reference_quantification_value: float = 10000.0,
                      reference_add_offset: float = 0.0,
                      bbox: tuple[float, float, float, float] | None = None) -> dict:
-    logger = get_run_logger()
     meta = parse_s2_l1c_metadata(ingested.metadata_path, ingested.tile_metadata_path)
 
     grid = load_water_bands(ingested.band_paths, bbox=bbox)
@@ -933,8 +814,8 @@ def processing_flow(ingested: IngestedProduct, atmos: AtmosphericParams,
         xa, xb, xc = build_6s_coefficients(band, meta, atmos)
         boa[band_id] = invert_to_boa(radiance, xa, xb, xc)
 
-    ndci = compute_ndci(boa["B04"], boa["B05"], verbose=True)
-    turbidity = compute_turbidity_index(boa["B03"], boa["B08"], verbose=True)
+    ndci = compute_ndci(boa["B04"], boa["B05"])
+    turbidity = compute_turbidity_index(boa["B03"], boa["B08"])
     mask = water_mask(boa["B03"], boa["B08"])
 
     results: dict = {"boa": boa, "ndci": ndci, "turbidity": turbidity,
@@ -945,9 +826,6 @@ def processing_flow(ingested: IngestedProduct, atmos: AtmosphericParams,
         results["ndci_uncertainty_proxy"] = monte_carlo_uncertainty(
             dns["B05"], _BANDS_BY_ID["B05"], meta, atmos
         )
-        logger.info("Incertezza Monte Carlo calcolata su B05 come proxy "
-                     "(la propagazione rigorosa sull'NDCI richiede la "
-                     "combinazione delle incertezze di B04 e B05).")
 
     if reference_ndci_path:
         ref_ndci = read_reference_product(
